@@ -24,4 +24,4 @@ The scripts/ are training, inference, and misc.
 
 # Updates
 
-1. We could use Hard Gumbel-Softmax such as from wave2vec 2.0 to select a one hot vector but remain differentiable. This model might come later so lets make it a later test.
+1. We could use Hard Gumbel-Softmax such as from wave2vec 2.0 to select a one hot vector but remain differentiable. This model might come later so lets make it a later test. Pytorch has a function to do this called, torch.`nn.functional.gumbel_softmax`.
