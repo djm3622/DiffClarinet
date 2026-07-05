@@ -1,6 +1,9 @@
 data/fixed_delay/*.wav
 data/fixed_L/*.wav
 
+data/fixed_delay/*.mat
+data/fixed_L/*.mat
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
