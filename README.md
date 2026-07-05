@@ -25,3 +25,4 @@ The scripts/ are training, inference, and misc.
 # Updates
 
 1. We could use Hard Gumbel-Softmax such as from wave2vec 2.0 to select a one hot vector but remain differentiable. This model might come later so lets make it a later test. Pytorch has a function to do this called, torch.`nn.functional.gumbel_softmax`.
+2. Do we need the excitations to match? Test first with no matching excitation, just generated uniform noise in the same way. If this doesn't work try using the exact excitaiton that the matlab model was given.
