@@ -58,10 +58,10 @@ def main():
     all_plus = True
     a = 0.1
     T = 40001
-    n_fft = 4096
+    n_fft = T # remember to change this back. it is only for testing 
 
     grad_norm = False
-    auraloss_package = True
+    auraloss_package = False
 
     if auraloss_package:
         n_fft = T
@@ -80,7 +80,7 @@ def main():
     # training
 
     optimizer = optim.Adam(model.parameters(), lr=8e-5)
-    epoch = 1000
+    epoch = 10000
     print_freq = 100
 
     if auraloss_package:
@@ -196,7 +196,7 @@ def main():
             )
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_11.pt"
+    model_path = output_directory + "karplus_strong_adaptive_14_non_aura_but_full_fft.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
