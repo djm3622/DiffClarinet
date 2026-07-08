@@ -18,7 +18,15 @@ def loss_fn(y, y_hat):
 
 
 def msl_loss():
-    pass
+    return auraloss.freq.STFTLoss(
+        fft_size=2048,
+        hop_size=512,
+        win_length=2048,
+        w_sc=1.0,
+        w_log_mag=1.0,
+        w_lin_mag=0.0,
+        w_phs=0.0,
+    )
 
 
 # for a later addition. it should help seperate out the effects of L and a

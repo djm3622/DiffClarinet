@@ -1,6 +1,6 @@
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
-from model.kps.objectives.frequency import to_log_mag, loss_fn
+from model.kps.objectives.frequency import to_log_mag, loss_fn, msl_loss
 from model.kps.helpers.training import generate_excitation
 
 from data.dataset import MatlabData
@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader
 from torch import fft
 from torch import optim
 import torch
+
+from tqdm.auto import tqdm
 
 def main():
 
@@ -52,31 +54,43 @@ def main():
 
     fixed = False
     L = 200
-    n_fft = 4096
     rescale = False
     all_plus = True
     a = 0.1
-    T = 40000
+    T = 40001
+    n_fft = 4096
+
     grad_norm = False
+    auraloss_package = True
+
+    if auraloss_package:
+        n_fft = T
 
     device = "cpu"
 
     model = None
 
     if fixed:
-        model = KarplusStrongFixed(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
+        model = KarplusStrongFixed(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a, auraloss_package=auraloss_package)
     else:
-        model = KarplusStrongAdaptive(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
+        model = KarplusStrongAdaptive(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a, auraloss_package=auraloss_package)
 
     model.to(device)
 
     # training
 
     optimizer = optim.Adam(model.parameters(), lr=8e-5)
-    epoch = 10000
-    print_freq = 1000
+    epoch = 1000
+    print_freq = 100
 
-    for e in range(epoch):
+    if auraloss_package:
+        loss_fcn = msl_loss().to(device)
+    else:
+        loss_fcn = loss_fn
+
+    epoch_bar = tqdm(range(epoch), desc="Epochs")
+
+    for e in epoch_bar:
         log = 0
         gain_difference = 0.0
         for elements in train_dataloader:
@@ -85,14 +99,27 @@ def main():
             target_gain = elements[2].unsqueeze(-1)**L
             exc = elements[-1].squeeze(1)
 
-            target = fft.rfft(audio, n=n_fft, dim=-1)
-
             optimizer.zero_grad()
 
-            if fixed:
-                loss = loss_fn(model(exc.to(device)), target.to(device))
+            if auraloss_package:
+                target = audio.unsqueeze(1)
+
+                if fixed:
+                    pred = model(exc.to(device)).unsqueeze(1)
+                    loss = loss_fcn(pred, target)
+                else:
+                    pred = model(audio.to(device), exc.to(device)).unsqueeze(1)
+                    loss = loss_fcn(pred, target)
+
             else:
-                loss = loss_fn(model(audio.to(device), exc.to(device)), target.to(device))
+                target = fft.rfft(audio, n=n_fft, dim=-1)
+
+                if fixed:
+                    pred = model(exc.to(device))
+                    loss = loss_fcn(pred, target)
+                else:
+                    pred = model(audio.to(device), exc.to(device))
+                    loss = loss_fcn(pred, target)
 
             loss.backward()
 
@@ -111,8 +138,13 @@ def main():
                 gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
 
         if (e + 1) % print_freq == 0:
-            print(f"\nEpoch [{e+1}/{epoch}]")
-            print(f"Loss: {log/len(train_dataloader)}, Gain Difference: {gain_difference/len(train_dataloader)}")
+            train_loss = log / len(train_dataloader)
+            train_gain = gain_difference / len(train_dataloader)
+
+            epoch_bar.set_postfix(
+                train_loss=f"{float(train_loss):.4f}",
+                train_gain=f"{float(train_gain):.4f}",
+            )
 
             # validation
             
@@ -126,22 +158,45 @@ def main():
                     target_gain = elements[2].unsqueeze(-1)**L
                     exc = elements[-1].squeeze(1)
 
-                    target = fft.rfft(audio, n=n_fft, dim=-1)
+                    optimizer.zero_grad()
 
-                    if fixed:
-                        loss = loss_fn(model(exc.to(device)), target.to(device))
+                    if auraloss_package:
+                        target = audio.unsqueeze(1)
+
+                        if fixed:
+                            pred = model(exc.to(device)).unsqueeze(1)
+                            loss = loss_fcn(pred, target)
+                        else:
+                            pred = model(audio.to(device), exc.to(device)).unsqueeze(1)
+                            loss = loss_fcn(pred, target)
+
                     else:
-                        loss = loss_fn(model(audio.to(device), exc.to(device)), target.to(device))
+                        target = fft.rfft(audio, n=n_fft, dim=-1)
+
+                        if fixed:
+                            pred = model(exc.to(device))
+                            loss = loss_fn(pred, target)
+                        else:
+                            pred = model(audio.to(device), exc.to(device))
+                            loss = loss_fn(pred, target)
 
                     val_loss += loss.item()
 
                     model_gain = model.scaled_gain(audio.to(device))
                     gain_difference_val += numeration.sampled_gains_against_target(model_gain, target_gain)
 
-            print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
+            val_loss_avg = val_loss / len(test_dataloader)
+            val_gain_avg = gain_difference_val / len(test_dataloader)
+
+            epoch_bar.set_postfix(
+                train_loss=f"{float(train_loss):.4f}",
+                train_gain=f"{float(train_gain):.4f}",
+                val_loss=f"{float(val_loss_avg):.4f}",
+                val_gain=f"{float(val_gain_avg):.4f}",
+            )
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_10_L_scale.pt"
+    model_path = output_directory + "karplus_strong_adaptive_11.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 

@@ -6,13 +6,14 @@ from torch import fft
 
 class KarplusStrongAdaptive(nn.Module):
 
-    def __init__(self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1):
+    def __init__(self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1, auraloss_package=True):
         super().__init__()
         self.delay_len = delay_len
         self.n_fft = n_fft
         self.rescale = rescale
         self.all_plus = all_plus
         self.a = a
+        self.auraloss_package = auraloss_package
 
         # for frequency sampling
         omega = torch.linspace(0.0, torch.pi, n_fft // 2 + 1)
@@ -79,7 +80,12 @@ class KarplusStrongAdaptive(nn.Module):
         
         # filter excitation in frequency domain
         # apply filter to the input
-        return exc_fft * numer / denom
+        y = exc_fft * numer / denom
+
+        if self.auraloss_package:
+            return torch.fft.irfft(y, n=self.n_fft, dim=-1)
+        else:
+            return y
     
     # also provide method for time domain synthesis
     def time_domain_synth(self, x, n_samples, noise):
