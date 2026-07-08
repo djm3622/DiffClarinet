@@ -141,7 +141,7 @@ def main():
             print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_8_should_be_same_as_5.pt"
+    model_path = output_directory + "karplus_strong_adaptive_9.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
