@@ -42,7 +42,7 @@ def main():
     # with batching, the adaptive model diverges a bit form the almost same inpmlenetation from before
     # now it must account for the extra dimension
     # it also does normalization to help the deeper network out a bit
-    batch_size = 16
+    batch_size = 4
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -140,7 +140,7 @@ def main():
             print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_7_larger_batch_size.pt"
+    model_path = output_directory + "karplus_strong_adaptive_8_should_be_same_as_5.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
