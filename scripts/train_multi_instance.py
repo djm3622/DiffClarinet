@@ -141,7 +141,7 @@ def main():
             print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_9.pt"
+    model_path = output_directory + "karplus_strong_adaptive_10_L_scale.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
@@ -153,12 +153,12 @@ def main():
     train_true_gains, train_predicted_gains = numeration.collect_gain_predictions(
         model=model,
         dataloader=train_dataloader,
-        L=L,
+        L=L
     )
     val_true_gains, val_predicted_gains = numeration.collect_gain_predictions(
         model=model,
         dataloader=test_dataloader,
-        L=L,
+        L=L
     )
 
     true_gains = torch.cat([train_true_gains, val_true_gains], dim=0)
