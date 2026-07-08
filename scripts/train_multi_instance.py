@@ -1,6 +1,7 @@
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
 from model.kps.objectives.frequency import to_log_mag, loss_fn
+from model.kps.helpers.training import generate_excitation
 
 from data.dataset import MatlabData
 from data.helpers import file_processing
