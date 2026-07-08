@@ -19,3 +19,8 @@ def loss_fn(y, y_hat):
 
 def msl_loss():
     pass
+
+
+# for a later addition. it should help seperate out the effects of L and a
+def phase_loss():
+    pass
