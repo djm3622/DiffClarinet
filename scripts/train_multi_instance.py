@@ -56,6 +56,9 @@ def main():
     all_plus = True
     a = 0.1
     T = 40000
+    grad_norm = True
+
+    device = "cpu"
 
     model = None
 
@@ -63,6 +66,8 @@ def main():
         model = KarplusStrongFixed(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
     else:
         model = KarplusStrongAdaptive(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
+
+    model.to(device)
 
     # training
 
@@ -84,23 +89,24 @@ def main():
             optimizer.zero_grad()
 
             if fixed:
-                loss = loss_fn(model(exc), target)
+                loss = loss_fn(model(exc.to(device)), target.to(device))
             else:
-                loss = loss_fn(model(audio, exc), target)
+                loss = loss_fn(model(audio.to(device), exc.to(device)), target.to(device))
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                max_norm=1.0,
-            )
+            if grad_norm:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=1.0,
+                )
 
             optimizer.step()
 
             log += loss.item()
 
             with torch.no_grad():
-                model_gain = model.scaled_gain(audio)
+                model_gain = model.scaled_gain(audio.to(device))
                 gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
 
         if (e + 1) % print_freq == 0:
@@ -122,13 +128,13 @@ def main():
                     target = fft.rfft(audio, n=n_fft, dim=-1)
 
                     if fixed:
-                        loss = loss_fn(model(exc), target)
+                        loss = loss_fn(model(exc.to(device)), target.to(device))
                     else:
-                        loss = loss_fn(model(audio, exc), target)
+                        loss = loss_fn(model(audio.to(device), exc.to(device)), target.to(device))
 
                     val_loss += loss.item()
 
-                    model_gain = model.scaled_gain(audio)
+                    model_gain = model.scaled_gain(audio.to(device))
                     gain_difference_val += numeration.sampled_gains_against_target(model_gain, target_gain)
 
             print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
@@ -137,6 +143,8 @@ def main():
     model_path = output_directory + "karplus_strong_adaptive_6.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
+
+    model = model.to("cpu")
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
