@@ -56,7 +56,7 @@ def main():
     all_plus = True
     a = 0.1
     T = 40000
-    grad_norm = True
+    grad_norm = False
 
     device = "cpu"
 
