@@ -66,7 +66,7 @@ def main():
 
     # training
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=8e-5)
     epoch = 10000
     print_freq = 1000
 
@@ -89,12 +89,19 @@ def main():
                 loss = loss_fn(model(audio, exc), target)
 
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0,
+            )
+
             optimizer.step()
 
             log += loss.item()
 
-            model_gain = model.scaled_gain(audio)
-            gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
+            with torch.no_grad():
+                model_gain = model.scaled_gain(audio)
+                gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
 
         if (e + 1) % print_freq == 0:
             print(f"\nEpoch [{e+1}/{epoch}]")
@@ -127,7 +134,7 @@ def main():
             print(f"Validation Loss: {val_loss/len(test_dataloader)}, Validation Gain Difference: {gain_difference_val/len(test_dataloader)}")
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_5.pt"
+    model_path = output_directory + "karplus_strong_adaptive_6.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
