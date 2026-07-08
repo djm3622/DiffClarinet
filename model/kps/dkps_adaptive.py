@@ -31,7 +31,7 @@ class KarplusStrongAdaptive(nn.Module):
             nn.Conv1d(16, 32, kernel_size=9, stride=4, padding=4),
             nn.GELU(),
 
-            nn.AdaptiveAvgPool1d(8),
+            nn.AdaptiveAvgPool1d(8), # number of output points
 
             nn.Flatten(),
             nn.Linear(32 * 8, 32),
