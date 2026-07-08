@@ -4,6 +4,10 @@ data/fixed_L/*.wav
 data/fixed_delay/*.mat
 data/fixed_L/*.mat
 
+testing.ipynb
+
+output/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
