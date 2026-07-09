@@ -23,7 +23,7 @@ def main():
 
     # data setup
 
-    directory = "data/fixed_L_f/"
+    directory = "data/fixed_L_t/"
 
     wav_paths = file_processing.get_files_in_dir_wav(directory)
     mat_paths = file_processing.get_files_in_dir_mat(directory)
@@ -144,7 +144,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_f_data")
+    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_m1")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 

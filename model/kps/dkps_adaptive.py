@@ -17,22 +17,46 @@ class KarplusStrongAdaptive(nn.Module):
 
         # for frequency sampling
         omega = torch.linspace(0.0, torch.pi, n_fft // 2 + 1)
-        self.register_buffer("z", torch.exp(1j * omega))  
+        self.register_buffer("z", torch.exp(1j * omega)) 
+        
+        encoder_type = "m1" # "s1, m1, l1"
 
-        self.encoder = nn.Sequential(
-            nn.Conv1d(1, 4, kernel_size=33, stride=4, padding=16),
-            nn.GELU(),
+        if encoder_type == "s1":
+            self.encoder = nn.Sequential(
+                nn.Conv1d(1, 4, kernel_size=33, stride=4, padding=16),
+                nn.GELU(),
 
-            nn.Conv1d(4, 8, kernel_size=15, stride=4, padding=7),
-            nn.GELU(),
+                nn.Conv1d(4, 8, kernel_size=15, stride=4, padding=7),
+                nn.GELU(),
 
-            nn.AdaptiveAvgPool1d(8),
+                nn.AdaptiveAvgPool1d(8),
 
-            nn.Flatten(),
-            nn.Linear(8 * 8, 16),
-            nn.GELU(),
-            nn.Linear(16, 1),
-        )
+                nn.Flatten(),
+                nn.Linear(8 * 8, 16),
+                nn.GELU(),
+                nn.Linear(16, 1),
+            )
+        elif encoder_type == "m1":
+            self.encoder = nn.Sequential(
+                nn.Conv1d(1, 4, kernel_size=33, stride=4, padding=16),
+                nn.GELU(),
+
+                nn.Conv1d(4, 8, kernel_size=15, stride=4, padding=7),
+                nn.GELU(),
+
+                nn.Conv1d(8, 16, kernel_size=9, stride=4, padding=4),
+                nn.GELU(),
+
+                nn.Conv1d(16, 32, kernel_size=9, stride=4, padding=4),
+                nn.GELU(),
+
+                nn.AdaptiveAvgPool1d(8), # number of output points
+
+                nn.Flatten(),
+                nn.Linear(32 * 8, 32),
+                nn.GELU(),
+                nn.Linear(32, 1)
+            )
 
         self.a = a
 
