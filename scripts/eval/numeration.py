@@ -14,7 +14,7 @@ def collect_gain_predictions(model, dataloader, L):
     with torch.no_grad():
         for elements in dataloader:
             audio = elements[0].squeeze(1)
-            target_gain = elements[2].unsqueeze(-1)**L
+            target_gain = elements[2].unsqueeze(-1)
 
             model_gain = model.scaled_gain(audio)
 

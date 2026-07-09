@@ -1,8 +1,5 @@
-data/fixed_delay/*.wav
-data/fixed_L/*.wav
-
-data/fixed_delay/*.mat
-data/fixed_L/*.mat
+**.mat
+**.wav
 
 testing.ipynb
 

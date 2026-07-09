@@ -23,7 +23,7 @@ def main():
 
     # data setup
 
-    directory = "data/fixed_L/"
+    directory = "data/fixed_L_t/"
 
     wav_paths = file_processing.get_files_in_dir_wav(directory)
     mat_paths = file_processing.get_files_in_dir_mat(directory)
@@ -31,7 +31,7 @@ def main():
     wav_paths = file_processing.sort_file_path_list(wav_paths)
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
-    train_size = int(0.8 * len(wav_paths)) 
+    train_size = int(0.9 * len(wav_paths)) 
 
     train_wav_paths = wav_paths[:train_size]
     train_mat_paths = mat_paths[:train_size]
@@ -66,7 +66,9 @@ def main():
     grad_norm = False
     auraloss_package = True
 
-    auraloss_type = "multi_scale"  # "stft" or "multi_scale"
+    weight_decay = True
+
+    auraloss_type = "stft"  # "stft" or "multi_scale"
 
     if auraloss_package:
         n_fft = T
@@ -84,9 +86,21 @@ def main():
 
     # training
 
-    optimizer = optim.Adam(model.parameters(), lr=8e-5)
-    epoch = 10000
-    print_freq = 100
+    # try weight decay instead
+    if weight_decay:
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=8e-5,
+            weight_decay=1e-4,
+        )
+    else:
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=8e-5,
+        )
+
+    epoch = 100
+    print_freq = 1
 
     if auraloss_package:
         if auraloss_type == "stft":
@@ -98,14 +112,17 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/kps_adaptive_17_batch_size_1_smaller_lr")
+    run_dir = Path("output/kps_adaptive_stft_batch_size_1_smaller_lr_shorter_t_data_wd")
+
     run_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = run_dir / "model.pt"
+    
     tensorboard_dir = run_dir / "tensorboard"
     plot_dir = run_dir / "plots"
     audio_dir = run_dir / "audio"
-
+    best_val_gain = float("inf")
+    best_model_path = run_dir / "best_model_by_val_gain.pt"
     plot_dir.mkdir(exist_ok=True)
     audio_dir.mkdir(exist_ok=True)
 
@@ -117,7 +134,7 @@ def main():
         for elements in train_dataloader:
             audio = elements[0].squeeze(1)
             sr = elements[1]
-            target_gain = elements[2].unsqueeze(-1)**L
+            target_gain = elements[2].unsqueeze(-1)
             exc = elements[-1].squeeze(1)
 
             optimizer.zero_grad()
@@ -184,7 +201,7 @@ def main():
                 for elements in test_dataloader:
                     audio = elements[0].squeeze(1)
                     sr = elements[1]
-                    target_gain = elements[2].unsqueeze(-1)**L
+                    target_gain = elements[2].unsqueeze(-1)
                     exc = elements[-1].squeeze(1)
 
                     if auraloss_package:
@@ -220,6 +237,12 @@ def main():
             val_loss_avg = val_loss / len(test_dataloader)
             val_gain_avg = gain_difference_val / len(test_dataloader)
 
+            val_gain_float = float(val_gain_avg)
+
+            if val_gain_float < best_val_gain:
+                best_val_gain = val_gain_float
+                torch.save(model.state_dict(), best_model_path)
+
             writer.add_scalar("loss/validation", val_loss_avg, step)
             writer.add_scalar("gain_difference/validation", val_gain_avg, step)
 
@@ -250,6 +273,7 @@ def main():
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
     model = model.to("cpu")
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
