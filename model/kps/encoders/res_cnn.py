@@ -61,7 +61,7 @@ class ResCNN(nn.Module):
                 ConvBlock(64, 128, kernel_size=9, stride=4),
 
                 nn.AdaptiveAvgPool1d(8),
-
+                
                 nn.Flatten(),
                 nn.Linear(128 * 8, 128),
                 nn.GELU(),
