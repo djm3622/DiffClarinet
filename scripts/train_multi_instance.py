@@ -16,6 +16,9 @@ import torch
 
 from tqdm.auto import tqdm
 
+from torch.utils.tensorboard import SummaryWriter
+from pathlib import Path
+
 def main():
 
     # data setup
@@ -45,7 +48,7 @@ def main():
     # with batching, the adaptive model diverges a bit form the almost same inpmlenetation from before
     # now it must account for the extra dimension
     # it also does normalization to help the deeper network out a bit
-    batch_size = 4
+    batch_size = 1
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
@@ -95,6 +98,19 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
+    run_dir = Path("output/kps_adaptive_17_batch_size_1_smaller_lr")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = run_dir / "model.pt"
+    tensorboard_dir = run_dir / "tensorboard"
+    plot_dir = run_dir / "plots"
+    audio_dir = run_dir / "audio"
+
+    plot_dir.mkdir(exist_ok=True)
+    audio_dir.mkdir(exist_ok=True)
+
+    writer = SummaryWriter(log_dir=str(tensorboard_dir))
+
     for e in epoch_bar:
         log = 0
         gain_difference = 0.0
@@ -143,8 +159,14 @@ def main():
                 gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
 
         if (e + 1) % print_freq == 0:
+            step = e + 1
+
             train_loss = log / len(train_dataloader)
             train_gain = gain_difference / len(train_dataloader)
+
+            writer.add_scalar("loss/train", train_loss, step)
+            writer.add_scalar("gain_difference/train", train_gain, step)
+            writer.add_scalar("learning_rate", optimizer.param_groups[0]["lr"], step)
 
             epoch_bar.set_postfix(
                 train_loss=f"{float(train_loss):.4f}",
@@ -152,9 +174,11 @@ def main():
             )
 
             # validation
-            
+
             val_loss = 0.0
             gain_difference_val = 0.0
+
+            model.eval()
 
             with torch.no_grad():
                 for elements in test_dataloader:
@@ -163,35 +187,59 @@ def main():
                     target_gain = elements[2].unsqueeze(-1)**L
                     exc = elements[-1].squeeze(1)
 
-                    optimizer.zero_grad()
-
                     if auraloss_package:
                         target = audio.unsqueeze(1)
 
                         if fixed:
                             pred = model(exc.to(device)).unsqueeze(1)
-                            loss = loss_fcn(pred, target)
+                            loss = loss_fcn(pred, target.to(device))
                         else:
                             pred = model(audio.to(device), exc.to(device)).unsqueeze(1)
-                            loss = loss_fcn(pred, target)
+                            loss = loss_fcn(pred, target.to(device))
 
                     else:
-                        target = fft.rfft(audio, n=n_fft, dim=-1)
+                        target = fft.rfft(audio.to(device), n=n_fft, dim=-1)
 
                         if fixed:
                             pred = model(exc.to(device))
-                            loss = loss_fn(pred, target)
+                            loss = loss_fcn(pred, target)
                         else:
                             pred = model(audio.to(device), exc.to(device))
-                            loss = loss_fn(pred, target)
+                            loss = loss_fcn(pred, target)
 
                     val_loss += loss.item()
 
                     model_gain = model.scaled_gain(audio.to(device))
-                    gain_difference_val += numeration.sampled_gains_against_target(model_gain, target_gain)
+                    gain_difference_val += numeration.sampled_gains_against_target(
+                        model_gain,
+                        target_gain.to(device),
+                    )
+
+            model.train()
 
             val_loss_avg = val_loss / len(test_dataloader)
             val_gain_avg = gain_difference_val / len(test_dataloader)
+
+            writer.add_scalar("loss/validation", val_loss_avg, step)
+            writer.add_scalar("gain_difference/validation", val_gain_avg, step)
+
+            writer.add_scalars(
+                "loss/combined",
+                {
+                    "train": train_loss,
+                    "validation": val_loss_avg,
+                },
+                step,
+            )
+
+            writer.add_scalars(
+                "gain_difference/combined",
+                {
+                    "train": train_gain,
+                    "validation": val_gain_avg,
+                },
+                step,
+            )
 
             epoch_bar.set_postfix(
                 train_loss=f"{float(train_loss):.4f}",
@@ -199,9 +247,6 @@ def main():
                 val_loss=f"{float(val_loss_avg):.4f}",
                 val_gain=f"{float(val_gain_avg):.4f}",
             )
-
-    output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_15_multi_scale.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
@@ -231,6 +276,7 @@ def main():
     )
 
     torch.save(model.state_dict(), model_path)
+    writer.close()
 
 if __name__ == "__main__":
     main()
