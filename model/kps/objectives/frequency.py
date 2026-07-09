@@ -17,11 +17,22 @@ def loss_fn(y, y_hat):
     return torch.mean((y_mags - y_hat_mags).abs())
 
 
-def msl_loss():
+def stft_loss():
     return auraloss.freq.STFTLoss(
         fft_size=2048,
         hop_size=512,
         win_length=2048,
+        w_sc=1.0,
+        w_log_mag=1.0,
+        w_lin_mag=0.0,
+        w_phs=0.0,
+    )
+
+def multi_scale_loss():
+    return auraloss.freq.MultiResolutionSTFTLoss(
+        fft_sizes=[512, 1024, 2048, 4096],
+        hop_sizes=[128, 256, 512, 1024],
+        win_lengths=[512, 1024, 2048, 4096],
         w_sc=1.0,
         w_log_mag=1.0,
         w_lin_mag=0.0,

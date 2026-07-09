@@ -1,6 +1,6 @@
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
-from model.kps.objectives.frequency import to_log_mag, loss_fn, msl_loss
+from model.kps.objectives.frequency import to_log_mag, loss_fn, stft_loss, multi_scale_loss
 from model.kps.helpers.training import generate_excitation
 
 from data.dataset import MatlabData
@@ -58,10 +58,12 @@ def main():
     all_plus = True
     a = 0.1
     T = 40001
-    n_fft = T # remember to change this back. it is only for testing 
+    n_fft = 4096 # remember to change this back. it is only for testing 
 
     grad_norm = False
-    auraloss_package = False
+    auraloss_package = True
+
+    auraloss_type = "multi_scale"  # "stft" or "multi_scale"
 
     if auraloss_package:
         n_fft = T
@@ -84,7 +86,10 @@ def main():
     print_freq = 100
 
     if auraloss_package:
-        loss_fcn = msl_loss().to(device)
+        if auraloss_type == "stft":
+            loss_fcn = stft_loss().to(device)
+        elif auraloss_type == "multi_scale":
+            loss_fcn = multi_scale_loss().to(device)
     else:
         loss_fcn = loss_fn
 
@@ -196,7 +201,7 @@ def main():
             )
 
     output_directory = "output/"
-    model_path = output_directory + "karplus_strong_adaptive_14_non_aura_but_full_fft.pt"
+    model_path = output_directory + "karplus_strong_adaptive_15_multi_scale.pt"
 
     # post eval plot (reuse the dataloaders and just plot the scatter)
 
