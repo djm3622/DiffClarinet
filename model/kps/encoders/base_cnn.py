@@ -3,7 +3,7 @@ from torch import nn
 
 class BaseCNN(nn.Module):
     def __init__(self, encoder_type):
-        super().__init__()
+        super(self).__init__()
 
         self.encoder_type = encoder_type # "s1, m1, l1"
 
@@ -20,7 +20,7 @@ class BaseCNN(nn.Module):
                 nn.Flatten(),
                 nn.Linear(8 * 8, 16),
                 nn.GELU(),
-                nn.Linear(16, 1),
+                nn.Linear(16, 1)
             )
         elif self.encoder_type == "m1":
             self.encoder = nn.Sequential(
@@ -67,7 +67,7 @@ class BaseCNN(nn.Module):
                 nn.GELU(),
                 nn.Linear(128, 32),
                 nn.GELU(),
-                nn.Linear(32, 1),
+                nn.Linear(32, 1)
             )
 
     def forward(self, x):
