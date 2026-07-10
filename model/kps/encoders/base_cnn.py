@@ -3,7 +3,7 @@ from torch import nn
 
 class BaseCNN(nn.Module):
     def __init__(self, encoder_type):
-        super(self).__init__()
+        super().__init__()
 
         self.encoder_type = encoder_type # "s1, m1, l1"
 

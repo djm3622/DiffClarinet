@@ -24,7 +24,7 @@ class DilatedBlock(nn.Module):
             in_channels,
             out_channels,
             kernel_size=1,
-            stride=stride,
+            stride=stride
         )
 
         self.act = nn.GELU()
@@ -33,7 +33,7 @@ class DilatedBlock(nn.Module):
         return self.act(self.net(x) + self.skip(x))
     
 
-class ResCNN(nn.Module):
+class DilatedCNN(nn.Module):
     def __init__(self, encoder_type):
         super().__init__()
 
@@ -42,38 +42,38 @@ class ResCNN(nn.Module):
         if self.encoder_type == "s1":
             self.encoder = nn.Sequential(
                 DilatedBlock(1, 4, kernel_size=33, stride=4, dilation=1),
-                DilatedBlock(4, 8, kernel_size=15, stride=4, dilation=1),
+                DilatedBlock(4, 8, kernel_size=15, stride=4, dilation=2),
 
                 nn.AdaptiveAvgPool1d(8),
 
                 nn.Flatten(),
                 nn.Linear(8 * 8, 16),
                 nn.GELU(),
-                nn.Linear(16, 1),
+                nn.Linear(16, 1)
             )
 
         elif self.encoder_type == "m1":
             self.encoder = nn.Sequential(
                 DilatedBlock(1, 4, kernel_size=33, stride=4, dilation=1),
-                DilatedBlock(4, 8, kernel_size=15, stride=4, dilation=1),
-                DilatedBlock(8, 16, kernel_size=9, stride=4, dilation=1),
-                DilatedBlock(16, 32, kernel_size=9, stride=4, dilation=1),
+                DilatedBlock(4, 8, kernel_size=15, stride=4, dilation=2),
+                DilatedBlock(8, 16, kernel_size=9, stride=4, dilation=4),
+                DilatedBlock(16, 32, kernel_size=9, stride=4, dilation=8),
 
                 nn.AdaptiveAvgPool1d(8),
 
                 nn.Flatten(),
                 nn.Linear(32 * 8, 32),
                 nn.GELU(),
-                nn.Linear(32, 1),
+                nn.Linear(32, 1)
             )
 
         elif self.encoder_type == "l1":
             self.encoder = nn.Sequential(
                 DilatedBlock(1, 8, kernel_size=65, stride=4, dilation=1),
                 DilatedBlock(8, 16, kernel_size=33, stride=4, dilation=1),
-                DilatedBlock(16, 32, kernel_size=15, stride=4, dilation=1),
-                DilatedBlock(32, 64, kernel_size=9, stride=4, dilation=1),
-                DilatedBlock(64, 128, kernel_size=9, stride=4, dilation=1),
+                DilatedBlock(16, 32, kernel_size=15, stride=1, dilation=2),
+                DilatedBlock(32, 64, kernel_size=9, stride=1, dilation=4),
+                DilatedBlock(64, 128, kernel_size=9, stride=1, dilation=8),
 
                 nn.AdaptiveAvgPool1d(8),
 
@@ -82,8 +82,9 @@ class ResCNN(nn.Module):
                 nn.GELU(),
                 nn.Linear(128, 32),
                 nn.GELU(),
-                nn.Linear(32, 1),
+                nn.Linear(32, 1)
             )
+
 
     def forward(self, x):
         return self.encoder(x)

@@ -4,6 +4,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch import fft
 
+from .encoders import base_cnn, dilated_cnn, res_cnn, spectral_2d_cnn
+
 class KarplusStrongAdaptive(nn.Module):
 
     def __init__(self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1, auraloss_package=True):
@@ -19,70 +21,17 @@ class KarplusStrongAdaptive(nn.Module):
         omega = torch.linspace(0.0, torch.pi, n_fft // 2 + 1)
         self.register_buffer("z", torch.exp(1j * omega)) 
         
-        encoder_type = "l1" # "s1, m1, l1"
+        encoder_type = "dilated" # "base", "res", "dilated", "spectral"
+        encoder_rank = "l1" # "s1", m1", "l1"
 
-        if encoder_type == "s1":
-            self.encoder = nn.Sequential(
-                nn.Conv1d(1, 4, kernel_size=33, stride=4, padding=16),
-                nn.GELU(),
-
-                nn.Conv1d(4, 8, kernel_size=15, stride=4, padding=7),
-                nn.GELU(),
-
-                nn.AdaptiveAvgPool1d(8),
-
-                nn.Flatten(),
-                nn.Linear(8 * 8, 16),
-                nn.GELU(),
-                nn.Linear(16, 1),
-            )
-        elif encoder_type == "m1":
-            self.encoder = nn.Sequential(
-                nn.Conv1d(1, 4, kernel_size=33, stride=4, padding=16),
-                nn.GELU(),
-
-                nn.Conv1d(4, 8, kernel_size=15, stride=4, padding=7),
-                nn.GELU(),
-
-                nn.Conv1d(8, 16, kernel_size=9, stride=4, padding=4),
-                nn.GELU(),
-
-                nn.Conv1d(16, 32, kernel_size=9, stride=4, padding=4),
-                nn.GELU(),
-
-                nn.AdaptiveAvgPool1d(8), # number of output points
-
-                nn.Flatten(),
-                nn.Linear(32 * 8, 32),
-                nn.GELU(),
-                nn.Linear(32, 1)
-            )
-        elif encoder_type == "l1":
-            self.encoder = nn.Sequential(
-                nn.Conv1d(1, 8, kernel_size=65, stride=4, padding=32),
-                nn.GELU(),
-
-                nn.Conv1d(8, 16, kernel_size=33, stride=4, padding=16),
-                nn.GELU(),
-
-                nn.Conv1d(16, 32, kernel_size=15, stride=4, padding=7),
-                nn.GELU(),
-
-                nn.Conv1d(32, 64, kernel_size=9, stride=4, padding=4),
-                nn.GELU(),
-
-                nn.Conv1d(64, 128, kernel_size=9, stride=4, padding=4),
-                nn.GELU(),
-
-                nn.AdaptiveAvgPool1d(8),
-
-                nn.Flatten(),
-                nn.Linear(128 * 8, 128),
-                nn.GELU(),
-                nn.Linear(128, 32),
-                nn.GELU(),
-                nn.Linear(32, 1),
-            )
+        if encoder_type == "base":
+            self.encoder = base_cnn.BaseCNN(encoder_rank)
+        elif encoder_type == "res":
+            self.encoder = res_cnn.ResCNN(encoder_rank)
+        elif encoder_type == "dilated":
+            self.encoder = dilated_cnn.DilatedCNN(encoder_rank)
+        elif encoder_type == "spectral":
+            pass
 
         self.a = a
 

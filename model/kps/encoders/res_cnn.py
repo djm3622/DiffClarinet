@@ -2,17 +2,32 @@ from torch import nn
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, kernel_size=9, stride=2):
+    def __init__(self, in_channels, out_channels, kernel_size=9, stride=2):
         super().__init__()
         padding = kernel_size // 2
 
         self.conv = nn.Sequential(
-            nn.Conv1d(in_ch, out_ch, kernel_size=kernel_size, stride=stride, padding=padding),
+            nn.Conv1d(
+                in_channels, 
+                out_channels, 
+                kernel_size=kernel_size, 
+                stride=stride, 
+                padding=padding
+            ),
             nn.GELU(),
-            nn.Conv1d(out_ch, out_ch, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv1d(
+                out_channels, 
+                out_channels, 
+                kernel_size=1
+            ),
         )
 
-        self.skip = nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride)
+        self.skip = nn.Conv1d(
+            in_channels, 
+            out_channels, 
+            kernel_size=1, 
+            stride=stride
+        )
 
         self.act = nn.GELU()
 
