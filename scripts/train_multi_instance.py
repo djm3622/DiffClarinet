@@ -95,7 +95,7 @@ def main():
     T = 40001
     n_fft = 4096 # remember to change this back. it is only for testing 
 
-    rand_excitations = True
+    rand_excitations = False
 
     grad_norm = False
     auraloss_package = True
@@ -146,7 +146,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_dilated_l1_givenexc")
+    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_dilated_l1_givenexc_02")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
