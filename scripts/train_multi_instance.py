@@ -95,6 +95,8 @@ def main():
     T = 40001
     n_fft = 4096 # remember to change this back. it is only for testing 
 
+    rand_excitations = True
+
     grad_norm = False
     auraloss_package = True
 
@@ -144,7 +146,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_dilated_l1_fixed3")
+    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_dilated_l1_givenexc")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +169,11 @@ def main():
             audio = elements[0].squeeze(1)
             sr = elements[1]
             target_gain = elements[2].unsqueeze(-1)
-            exc = elements[-1].squeeze(1)
+
+            if rand_excitations:
+                exc = generate_excitation(L, batch_size=batch_size, device=device)
+            else:
+                exc = elements[-1].squeeze(1)
 
             optimizer.zero_grad()
 
@@ -234,7 +240,11 @@ def main():
                     audio = elements[0].squeeze(1)
                     sr = elements[1]
                     target_gain = elements[2].unsqueeze(-1)
-                    exc = elements[-1].squeeze(1)
+
+                    if rand_excitations:
+                        exc = generate_excitation(L, batch_size=batch_size, device=device)
+                    else:
+                        exc = elements[-1].squeeze(1)
 
                     if auraloss_package:
                         target = audio.unsqueeze(1)
