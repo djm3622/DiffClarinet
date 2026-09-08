@@ -22,8 +22,10 @@ from pathlib import Path
 def main():
 
     # data setup
+    # small_f.*exc.*gain_difference_combined_train|small_f.*exc.*gain_difference_combined_validation
+    # small_t.*exc.*gain_difference_combined_train|small_t.*exc.*gain_difference_combined_validation
 
-    directory = "data/fixed_L_t/"
+    directory = "data/fixed_L_f/"
 
     wav_paths = file_processing.get_files_in_dir_wav(directory)
     mat_paths = file_processing.get_files_in_dir_mat(directory)
@@ -35,7 +37,7 @@ def main():
     train_size = int(0.9 * len(wav_paths))
 
     swap = False
-    split_type = "in_dist" # "in_dist" or "out_dist"
+    split_type = "out_dist" # "in_dist" or "out_dist"
     in_dist_seed = 0
 
     if split_type == "out_dist":
@@ -74,8 +76,19 @@ def main():
         print(f"Training samples: {len(train_wav_paths)}")
         print(f"Testing samples: {len(test_wav_paths)}")
 
-    train_dataset = MatlabData(train_wav_paths, train_mat_paths)
-    test_dataset = MatlabData(test_wav_paths, test_mat_paths)
+    all_plus_learnable = False
+    delay_gain_learnable = True
+    delay_len_learnable = False
+
+
+    train_dataset = MatlabData(
+        train_wav_paths, train_mat_paths, 
+        delay_gain=delay_gain_learnable, L=delay_len_learnable, a=all_plus_learnable
+    )
+    test_dataset = MatlabData(
+        test_wav_paths, test_mat_paths, 
+        delay_gain=delay_gain_learnable, L=delay_len_learnable, a=all_plus_learnable
+    )
 
     # with batching, the adaptive model diverges a bit form the almost same inpmlenetation from before
     # now it must account for the extra dimension
@@ -133,7 +146,7 @@ def main():
             lr=8e-5,
         )
 
-    epoch = 100
+    epoch = 30
     print_freq = 1
 
     if auraloss_package:
@@ -146,7 +159,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/kps_adapt_in_dist_stft_bs1_small_t_data_dilated_l1_givenexc_02")
+    run_dir = Path("output/new_run_1_out_dist")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,7 +179,7 @@ def main():
         log = 0
         gain_difference = 0.0
         for elements in train_dataloader:
-            audio = elements[0].squeeze(1)
+            audio = elements[0].squeeze(1).to(device)
             sr = elements[1]
             target_gain = elements[2].unsqueeze(-1)
 
@@ -177,25 +190,29 @@ def main():
 
             optimizer.zero_grad()
 
-            if auraloss_package:
-                target = audio.unsqueeze(1)
-
-                if fixed:
-                    pred = model(exc.to(device)).unsqueeze(1)
-                    loss = loss_fcn(pred, target)
-                else:
-                    pred = model(audio.to(device), exc.to(device)).unsqueeze(1)
-                    loss = loss_fcn(pred, target)
-
+            target_wave = audio[..., 1:]
+            if fixed:
+                prediction_wave = model.time_domain_synth(
+                    target_wave.shape[-1],
+                    exc.to(device),
+                )
+                if prediction_wave.ndim == 1:
+                    prediction_wave = prediction_wave.unsqueeze(0)
             else:
-                target = fft.rfft(audio, n=n_fft, dim=-1)
+                prediction_wave = model.time_domain_synth(
+                    audio,
+                    target_wave.shape[-1],
+                    exc.to(device),
+                )
 
-                if fixed:
-                    pred = model(exc.to(device))
-                    loss = loss_fcn(pred, target)
-                else:
-                    pred = model(audio.to(device), exc.to(device))
-                    loss = loss_fcn(pred, target)
+            if auraloss_package:
+                target = target_wave.unsqueeze(1)
+                pred = prediction_wave.unsqueeze(1)
+                loss = loss_fcn(pred, target)
+            else:
+                target = fft.rfft(target_wave, n=n_fft, dim=-1)
+                pred = fft.rfft(prediction_wave, n=n_fft, dim=-1)
+                loss = loss_fcn(pred, target)
 
             loss.backward()
 
@@ -210,7 +227,7 @@ def main():
             log += loss.item()
 
             with torch.no_grad():
-                model_gain = model.scaled_gain(audio.to(device))
+                model_gain = model.scaled_gain(audio)
                 gain_difference += numeration.sampled_gains_against_target(model_gain, target_gain)
 
         if (e + 1) % print_freq == 0:
@@ -237,7 +254,7 @@ def main():
 
             with torch.no_grad():
                 for elements in test_dataloader:
-                    audio = elements[0].squeeze(1)
+                    audio = elements[0].squeeze(1).to(device)
                     sr = elements[1]
                     target_gain = elements[2].unsqueeze(-1)
 
@@ -246,29 +263,33 @@ def main():
                     else:
                         exc = elements[-1].squeeze(1)
 
-                    if auraloss_package:
-                        target = audio.unsqueeze(1)
-
-                        if fixed:
-                            pred = model(exc.to(device)).unsqueeze(1)
-                            loss = loss_fcn(pred, target.to(device))
-                        else:
-                            pred = model(audio.to(device), exc.to(device)).unsqueeze(1)
-                            loss = loss_fcn(pred, target.to(device))
-
+                    target_wave = audio[..., 1:]
+                    if fixed:
+                        prediction_wave = model.time_domain_synth(
+                            target_wave.shape[-1],
+                            exc.to(device),
+                        )
+                        if prediction_wave.ndim == 1:
+                            prediction_wave = prediction_wave.unsqueeze(0)
                     else:
-                        target = fft.rfft(audio.to(device), n=n_fft, dim=-1)
+                        prediction_wave = model.time_domain_synth(
+                            audio,
+                            target_wave.shape[-1],
+                            exc.to(device),
+                        )
 
-                        if fixed:
-                            pred = model(exc.to(device))
-                            loss = loss_fcn(pred, target)
-                        else:
-                            pred = model(audio.to(device), exc.to(device))
-                            loss = loss_fcn(pred, target)
+                    if auraloss_package:
+                        target = target_wave.unsqueeze(1)
+                        pred = prediction_wave.unsqueeze(1)
+                        loss = loss_fcn(pred, target)
+                    else:
+                        target = fft.rfft(target_wave, n=n_fft, dim=-1)
+                        pred = fft.rfft(prediction_wave, n=n_fft, dim=-1)
+                        loss = loss_fcn(pred, target)
 
                     val_loss += loss.item()
 
-                    model_gain = model.scaled_gain(audio.to(device))
+                    model_gain = model.scaled_gain(audio)
                     gain_difference_val += numeration.sampled_gains_against_target(
                         model_gain,
                         target_gain.to(device),

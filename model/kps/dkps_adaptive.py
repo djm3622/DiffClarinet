@@ -84,36 +84,54 @@ class KarplusStrongAdaptive(nn.Module):
     def time_domain_synth(self, x, n_samples, noise):
         delay_gain = self.scaled_gain(x)
 
-        exc = torch.zeros(self.n_fft) 
-        exc[:self.delay_len] = noise
+        if noise.ndim == 1:
+            noise = noise.unsqueeze(0)
+        if noise.shape[-1] != self.delay_len:
+            raise ValueError(
+                f"Expected excitation length {self.delay_len}, "
+                f"but received {noise.shape[-1]}."
+            )
+
+        if n_samples >= self.delay_len:
+            exc = F.pad(noise, (0, n_samples - self.delay_len))
+        else:
+            exc = noise[..., :n_samples]
+
+        batch_size = exc.shape[0]
+        delay_gain = delay_gain.reshape(-1)
+        if delay_gain.numel() != batch_size:
+            raise ValueError(
+                "The number of predicted gains must match the excitation batch size."
+            )
 
         if not self.all_plus:
-            a_coeffs = torch.zeros(self.delay_len + 2) # poles of delay line
-            a_coeffs[0] = 2
-            a_coeffs[self.delay_len] = -delay_gain
-            a_coeffs[self.delay_len + 1] = -delay_gain
+            coefficient_count = self.delay_len + 2
+            a_coeffs = noise.new_zeros(batch_size, coefficient_count)
+            a_coeffs[:, 0] = 2
+            a_coeffs[:, self.delay_len] = -delay_gain
+            a_coeffs[:, self.delay_len + 1] = -delay_gain
 
-            b_coeffs = torch.zeros(self.delay_len + 2) # zeros of delay line
-            b_coeffs[0] = 1
-            b_coeffs[1] = 1
+            b_coeffs = noise.new_zeros(batch_size, coefficient_count)
+            b_coeffs[:, 0] = 1
+            b_coeffs[:, 1] = 1
         else:
-            a_coeffs = torch.zeros(self.delay_len + 3) # poles of delay line
-            a_coeffs[0] = 1
-            a_coeffs[1] = self.a
-            a_coeffs[self.delay_len] = - delay_gain*self.a/2
-            a_coeffs[self.delay_len + 1] = - (delay_gain*(self.a+1))/2
-            a_coeffs[self.delay_len + 2] = - (delay_gain/2)
+            coefficient_count = self.delay_len + 3
+            a_coeffs = noise.new_zeros(batch_size, coefficient_count)
+            a_coeffs[:, 0] = 1
+            a_coeffs[:, 1] = self.a
+            a_coeffs[:, self.delay_len] = -delay_gain * self.a / 2
+            a_coeffs[:, self.delay_len + 1] = -delay_gain * (self.a + 1) / 2
+            a_coeffs[:, self.delay_len + 2] = -delay_gain / 2
 
-            b_coeffs = torch.zeros(self.delay_len + 3) # zeros of delay line
-            b_coeffs[0] = self.a / 2
-            b_coeffs[1] = (self.a + 1) / 2
-            b_coeffs[2] = 1/2
+            b_coeffs = noise.new_zeros(batch_size, coefficient_count)
+            b_coeffs[:, 0] = self.a / 2
+            b_coeffs[:, 1] = (self.a + 1) / 2
+            b_coeffs[:, 2] = 1 / 2
 
-        # pad or truncate exc to n_samples
-        if exc.shape[0] < n_samples:
-            audio = torch.cat([exc, torch.zeros(n_samples - exc.shape[0])])
-        else:
-            audio = exc[:n_samples]
-
-        audio = torchaudio.functional.lfilter(audio, a_coeffs, b_coeffs, clamp=False)
-        return audio
+        return torchaudio.functional.lfilter(
+            exc,
+            a_coeffs,
+            b_coeffs,
+            clamp=False,
+            batching=True,
+        )

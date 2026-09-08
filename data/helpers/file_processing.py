@@ -13,6 +13,12 @@ def seperate_out_delay_gain(file_name: str) -> float:
     return float(delay_gain)
 
 
+def seperate_out_a(file_name: str) -> float:
+    no_post = ".".join(file_name.split('.')[:1+1])
+    a = no_post.split('_')[-1]
+    return float(a)
+
+
 def seperate_out_seed(file_name: str) -> int:
     no_post = file_name.split('.')[0]
     seed = no_post.split('_')[-1]

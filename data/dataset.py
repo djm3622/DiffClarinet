@@ -4,7 +4,7 @@ from . import preprocessing
 
 
 class MatlabData(Dataset):
-    def __init__(self, wav_paths, excitation_paths, delay_gain=True, L=False):
+    def __init__(self, wav_paths, excitation_paths, delay_gain=False, L=False, a=True):
         self.audios = []
         self.excs = []
 
@@ -20,6 +20,9 @@ class MatlabData(Dataset):
             if L:
                 delay = file_processing.seperate_out_L(wav_path)
                 t.append(delay)
+            if a:
+                a_val = file_processing.seperate_out_a(wav_path)
+                t.append(a_val)
 
             self.audios.append(t)
             self.excs.append(exc)
