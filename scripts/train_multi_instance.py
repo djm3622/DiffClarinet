@@ -189,6 +189,12 @@ def main():
             sr = elements[1]
             target_gain = elements[2].unsqueeze(-1)
 
+            """
+            the loss will be higher with random excitations, but it actually fits fairly well.
+
+            if the excitations are exact the loss is significantly lower, 
+            but the gain difference is roughly the same (marginall better but sacrifices generalization).
+            """
             if rand_excitations:
                 exc = generate_excitation(L, batch_size=batch_size, device=device)
             else:
