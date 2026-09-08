@@ -38,7 +38,7 @@ def main():
     train_size = int(0.9 * len(wav_paths))
 
     swap = False
-    split_type = "out_dist" # "in_dist" or "out_dist"
+    split_type = "in_dist" # "in_dist" or "out_dist"
     in_dist_seed = 0
 
     if split_type == "out_dist":
@@ -150,6 +150,11 @@ def main():
     epoch = 30
     print_freq = 1
 
+    """
+    looking at the stft loss for the lower gains and the higher gains, they have different magnitudes. 0.3: 0.025 -> 0.99: 0.468
+
+    we could probably normalize the loss by the average energy of the target signal
+    """
     if auraloss_package:
         if auraloss_type == "stft":
             loss_fcn = stft_loss().to(device)
@@ -160,7 +165,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/new_run_1_out_dist_fixed_dataset_ordering")
+    run_dir = Path("output/new_run_1_in_dist_fixed_dataset_ordering")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
