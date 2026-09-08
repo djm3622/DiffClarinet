@@ -2,6 +2,8 @@
 
 Currently working on training our own version of DDSP for the Karplus strong model with an all-pass filter (slightly different than the tutorial but the same idea).
 
+After extending the mulit-karplus strong model fulling to L, a, and K we will make the clarinet model.
+
 ## Data
 
 The data/ is samples collected from matlab.
