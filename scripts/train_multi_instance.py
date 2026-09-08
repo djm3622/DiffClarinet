@@ -25,8 +25,9 @@ def main():
     # small_f.*exc.*gain_difference_combined_train|small_f.*exc.*gain_difference_combined_validation
     # small_t.*exc.*gain_difference_combined_train|small_t.*exc.*gain_difference_combined_validation
 
-    directory = "data/fixed_L_f/"
+    directory = "data/fixed_L/"
 
+    # these orderings were completely messed up
     wav_paths = file_processing.get_files_in_dir_wav(directory)
     mat_paths = file_processing.get_files_in_dir_mat(directory)
 
@@ -159,7 +160,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/new_run_1_out_dist")
+    run_dir = Path("output/new_run_1_out_dist_fixed_dataset_ordering")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
