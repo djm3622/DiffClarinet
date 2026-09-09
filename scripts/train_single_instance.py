@@ -20,12 +20,43 @@ def _scalar_value(value: float | torch.Tensor) -> float:
     return float(value)
 
 
+def _propose_delay_len(
+    current_delay_len: int,
+    delay_len_min: int,
+    delay_len_max: int,
+    global_proposal_probability: float,
+    rng: np.random.Generator,
+) -> int:
+    if rng.random() < global_proposal_probability:
+        return int(rng.integers(delay_len_min, delay_len_max + 1))
+
+    step = -1 if rng.random() < 0.5 else 1
+    return int(np.clip(
+        current_delay_len + step,
+        delay_len_min,
+        delay_len_max,
+    ))
+
+
+def _accept_delay_proposal(
+    current_loss: float,
+    proposed_loss: float,
+    temperature: float,
+    rng: np.random.Generator,
+) -> bool:
+    loss_increase = proposed_loss - current_loss
+    if loss_increase <= 0.0:
+        return True
+    return bool(rng.random() < np.exp(-loss_increase / temperature))
+
+
 def main() -> None:
     # data setup
 
-    seed = 2
+    seed = 0
     np.random.seed(seed)
     torch.manual_seed(seed)
+    delay_rng = np.random.default_rng(seed)
     print(f"Random seed: {seed}")
 
     directory = "data/vary_fixed_k_a/"
@@ -37,8 +68,8 @@ def main() -> None:
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
     train_indx = 5622
-    all_plus_learnable = False
-    delay_gain_learnable = False
+    all_plus_learnable = True
+    delay_gain_learnable = True
     delay_len_learnable = True
 
     train_wav_paths = wav_paths[train_indx:train_indx+1]
@@ -64,7 +95,7 @@ def main() -> None:
     # model setup
 
     fixed = True
-    circular = True  # analytic response permits straight-through gradients for L
+    circular = True
     L = 200
     delay_len_min = 40
     delay_len_max = 240
@@ -110,16 +141,42 @@ def main() -> None:
 
     # training
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    trainable_parameters = [
+        parameter for parameter in model.parameters()
+        if parameter.requires_grad
+    ]
+    optimizer = (
+        optim.Adam(trainable_parameters, lr=1e-2)
+        if trainable_parameters
+        else None
+    )
     epoch = 20000
     print_freq = 1000
+    initial_delay_temperature = 1.0
+    final_delay_temperature = 0.01
+    global_delay_proposal_probability = 0.1
+
+    if delay_len_learnable and not (fixed and circular):
+        raise ValueError(
+            "Discrete delay-length optimization requires fixed=True and "
+            "circular=True."
+        )
 
     trajectory_gains = [_scalar_value(model.scaled_gain())]
     trajectory_a = [_scalar_value(model.scaled_allplus())]
     trajectory_delay_lengths = [model.scaled_delay_len()]
+    accepted_delay_moves = 0
+    attempted_delay_moves = 0
 
     for e in range(epoch):
         log = 0
+        progress = e / max(epoch - 1, 1)
+        delay_temperature = (
+            initial_delay_temperature
+            * (final_delay_temperature / initial_delay_temperature)
+            ** progress
+        )
+
         for elements in train_dataloader:
             audio = elements[0].squeeze(0)
             exc = elements[-1].squeeze(0)
@@ -128,28 +185,73 @@ def main() -> None:
             target_wave = audio[..., 1:1 + n_fft]
             target = fft.rfft(target_wave, n=n_fft).squeeze()
 
-            optimizer.zero_grad()
+            gradient_loss = None
+            if optimizer is not None:
+                optimizer.zero_grad()
 
-            if fixed and circular:
-                prediction = model(exc)
-                loss = loss_fn(prediction, target)
-            elif fixed:
-                prediction_wave = model.time_domain_synth(n_fft, exc)
-                prediction = fft.rfft(prediction_wave, n=n_fft)
-                loss = loss_fn(prediction, target)
+                if fixed and circular:
+                    prediction = model(exc)
+                    gradient_loss = loss_fn(prediction, target)
+                elif fixed:
+                    prediction_wave = model.time_domain_synth(n_fft, exc)
+                    prediction = fft.rfft(prediction_wave, n=n_fft)
+                    gradient_loss = loss_fn(prediction, target)
+                else:
+                    prediction_wave = model.time_domain_synth(
+                        audio,
+                        n_fft,
+                        exc,
+                    )
+                    prediction = fft.rfft(prediction_wave, n=n_fft)
+                    gradient_loss = loss_fn(prediction, target)
+
+                gradient_loss.backward()
+                optimizer.step()
+
+            if delay_len_learnable:
+                current_delay_len = model.scaled_delay_len()
+                proposed_delay_len = _propose_delay_len(
+                    current_delay_len=current_delay_len,
+                    delay_len_min=delay_len_min,
+                    delay_len_max=delay_len_max,
+                    global_proposal_probability=(
+                        global_delay_proposal_probability
+                    ),
+                    rng=delay_rng,
+                )
+
+                with torch.no_grad():
+                    current_loss = float(loss_fn(model(exc), target).item())
+
+                    if proposed_delay_len != current_delay_len:
+                        attempted_delay_moves += 1
+                        model.set_delay_len(proposed_delay_len)
+                        proposed_loss = float(
+                            loss_fn(model(exc), target).item()
+                        )
+                        accepted = _accept_delay_proposal(
+                            current_loss=current_loss,
+                            proposed_loss=proposed_loss,
+                            temperature=delay_temperature,
+                            rng=delay_rng,
+                        )
+                        if accepted:
+                            accepted_delay_moves += 1
+                            current_loss = proposed_loss
+                        else:
+                            model.set_delay_len(current_delay_len)
+
+                loss_value = current_loss
+            elif gradient_loss is not None:
+                loss_value = float(gradient_loss.detach().item())
             else:
-                prediction_wave = model.time_domain_synth(audio, n_fft, exc)
-                prediction = fft.rfft(prediction_wave, n=n_fft)
-                loss = loss_fn(prediction, target)
-
-            loss.backward()
-            optimizer.step()
+                raise RuntimeError("No trainable parameters were configured.")
 
             trajectory_gains.append(_scalar_value(model.scaled_gain()))
             trajectory_a.append(_scalar_value(model.scaled_allplus()))
             trajectory_delay_lengths.append(model.scaled_delay_len())
 
-            log += loss.item()
+            log += loss_value
 
         if (e + 1) % print_freq == 0:
             print(
@@ -157,10 +259,15 @@ def main() -> None:
                 f"Loss: {log/len(train_dataloader)}"
             )
             if delay_len_learnable:
+                acceptance_rate = (
+                    accepted_delay_moves / attempted_delay_moves
+                    if attempted_delay_moves
+                    else 0.0
+                )
                 print(
-                    "Delay length: "
-                    f"continuous={_scalar_value(model.continuous_delay_len()):.4f}; "
-                    f"discrete={model.scaled_delay_len()}"
+                    f"Delay length: {model.scaled_delay_len()}; "
+                    f"temperature={delay_temperature:.4f}; "
+                    f"acceptance_rate={acceptance_rate:.4f}"
                 )
 
     if delay_gain_learnable:

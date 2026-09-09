@@ -55,31 +55,20 @@ class KarplusStrongFixed(nn.Module):
             self.delay_len_max = delay_len_max
 
             if random_init:
-                initial_delay_len = torch.randint(
-                    delay_len_min,
-                    delay_len_max + 1,
-                    (),
-                    dtype=torch.int64,
-                ).to(torch.get_default_dtype())
+                self.delay_len = int(
+                    torch.randint(
+                        delay_len_min,
+                        delay_len_max + 1,
+                        (),
+                    ).item()
+                )
             else:
                 if not delay_len_min <= delay_len <= delay_len_max:
                     raise ValueError(
                         f"delay_len={delay_len} is outside the candidate "
                         f"range [{delay_len_min}, {delay_len_max}]."
                     )
-                initial_delay_len = torch.tensor(
-                    delay_len,
-                    dtype=torch.get_default_dtype(),
-                )
-
-            # Map integer bin centers to a finite unconstrained parameter.
-            # The half-bin extension lets the endpoint delays remain reachable
-            # without initializing a saturated logit.
-            delay_span = delay_len_max - delay_len_min + 1
-            initial_fraction = (
-                initial_delay_len - delay_len_min + 0.5
-            ) / delay_span
-            self.delay_len_raw = nn.Parameter(torch.logit(initial_fraction))
+                self.delay_len = int(delay_len)
         else:
             self.delay_len = delay_len
 
@@ -97,54 +86,27 @@ class KarplusStrongFixed(nn.Module):
             return torch.sigmoid(self.a)
         return self.a
 
-    def continuous_delay_len(self):
-        if self.delay_len_learnable:
-            delay_span = self.delay_len_max - self.delay_len_min + 1
-            return (
-                self.delay_len_min
-                - 0.5
-                + delay_span * torch.sigmoid(self.delay_len_raw)
-            )
-        return self.delay_len
-
-    def straight_through_delay_len(self):
-        delay_len_soft = self.continuous_delay_len()
-        delay_len_hard = torch.round(delay_len_soft).clamp(
-            self.delay_len_min,
-            self.delay_len_max,
-        )
-        return delay_len_soft + (delay_len_hard - delay_len_soft).detach()
-
     def scaled_delay_len(self):
-        if self.delay_len_learnable:
-            delay_len = torch.round(self.continuous_delay_len()).clamp(
-                self.delay_len_min,
-                self.delay_len_max,
+        return int(self.delay_len)
+
+    def set_delay_len(self, delay_len):
+        if not self.delay_len_learnable:
+            raise RuntimeError("delay_len is not configured for optimization.")
+        if not self.delay_len_min <= delay_len <= self.delay_len_max:
+            raise ValueError(
+                f"delay_len={delay_len} is outside the candidate range "
+                f"[{self.delay_len_min}, {self.delay_len_max}]."
             )
-            return int(delay_len.detach().item())
-        return self.delay_len
+        self.delay_len = int(delay_len)
     
     # forward pass: synthesis in the frequency domain
     def forward(self, noise):
         noise = noise.flatten()
         z = self.z
-
-        if self.delay_len_learnable:
-            delay_len = self.straight_through_delay_len()
-            hard_delay_len = int(delay_len.detach().item())
-            exc = noise.new_zeros(self.n_fft)
-            copied_samples = min(
-                hard_delay_len,
-                self.n_fft,
-                noise.numel(),
-            )
-            exc[:copied_samples] = noise[:copied_samples]
-
-        else:
-            delay_len = self.delay_len
-            exc = noise.new_zeros(self.n_fft)
-            copied_samples = min(delay_len, self.n_fft, noise.numel())
-            exc[:copied_samples] = noise[:copied_samples]
+        delay_len = self.scaled_delay_len()
+        exc = noise.new_zeros(self.n_fft)
+        copied_samples = min(delay_len, self.n_fft, noise.numel())
+        exc[:copied_samples] = noise[:copied_samples]
 
         exc_fft = torch.fft.rfft(exc)
         
