@@ -8,7 +8,10 @@ from .encoders import base_cnn, dilated_cnn, res_cnn, spectral_2d_cnn
 
 class KarplusStrongAdaptive(nn.Module):
 
-    def __init__(self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1, auraloss_package=True):
+    def __init__(
+        self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1, 
+        auraloss_package=True, all_pass_learnable=True, delay_len_learnable=True
+    ):
         super().__init__()
         self.delay_len = delay_len
         self.n_fft = n_fft
@@ -16,6 +19,8 @@ class KarplusStrongAdaptive(nn.Module):
         self.all_plus = all_plus
         self.a = a
         self.auraloss_package = auraloss_package
+        self.all_pass_learnable = all_pass_learnable
+        self.delay_len_learnable = delay_len_learnable
 
         # for frequency sampling
         omega = torch.linspace(0.0, torch.pi, n_fft // 2 + 1)
@@ -25,11 +30,32 @@ class KarplusStrongAdaptive(nn.Module):
         encoder_rank = "l1" # "s1", m1", "l1"
 
         if encoder_type == "base":
-            self.encoder = base_cnn.BaseCNN(encoder_rank)
+            if delay_len_learnable:
+                self.delay_encoder = base_cnn.BaseCNN(encoder_rank)
+            else:
+                self.delay_encoder = None
+            if all_pass_learnable:
+                self.all_pass_encoder = base_cnn.BaseCNN(encoder_rank)
+            else:
+                self.all_pass_encoder = None
         elif encoder_type == "res":
-            self.encoder = res_cnn.ResCNN(encoder_rank)
+            if delay_len_learnable:
+                self.delay_encoder = res_cnn.ResCNN(encoder_rank)
+            else:
+                self.delay_encoder = None
+            if all_pass_learnable:
+                self.all_pass_encoder = res_cnn.ResCNN(encoder_rank)
+            else:
+                self.all_pass_encoder = None
         elif encoder_type == "dilated":
-            self.encoder = dilated_cnn.DilatedCNN(encoder_rank)
+            if delay_len_learnable:
+                self.delay_encoder = dilated_cnn.DilatedCNN(encoder_rank)
+            else:
+                self.delay_encoder = None
+            if all_pass_learnable:
+                self.all_pass_encoder = dilated_cnn.DilatedCNN(encoder_rank)
+            else:
+                self.all_pass_encoder = None
         elif encoder_type == "spectral":
             pass
 
@@ -49,11 +75,32 @@ class KarplusStrongAdaptive(nn.Module):
         )
 
         x = x / initial_rms
-        y = self.encoder(x.unsqueeze(1))
+        y = self.delay_encoder(x.unsqueeze(1))
 
         if self.rescale:
             return torch.sigmoid(y) * 0.1 + 0.9 # for to be positive, then scale. this init value is 0.95
         return torch.sigmoid(y)
+
+
+    def scaled_allplus(self, x):
+        # rms normalization
+        # instead of peak amplitude, use the root mean square to give a slightly more stable estimate
+        initial_rms = torch.sqrt(
+            torch.mean(
+                x[:, :self.delay_len] ** 2,
+                dim=-1,
+                keepdim=True
+            )
+            + 1e-8
+        )
+        
+        x = x / initial_rms
+        y = self.all_pass_encoder(x.unsqueeze(1))
+        
+        if self.rescale:
+            return torch.sigmoid(y) * 0.1 + 0.9 # for to be positive, then scale. this init value is 0.95
+        return torch.sigmoid(y)
+    
     
     # forward pass: synthesis in the frequency domain
     def forward(self, x, noise):
