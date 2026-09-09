@@ -47,7 +47,7 @@ def main() -> None:
     wav_paths = file_processing.sort_file_path_list(wav_paths)
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
-    train_indx = 100
+    train_indx = 6000
     all_plus_learnable = True
     delay_gain_learnable = True
     delay_len_learnable = True

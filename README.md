@@ -28,5 +28,7 @@ The scripts/ are training, inference, and misc.
 
 1. We could use Hard Gumbel-Softmax such as from wave2vec 2.0 to select a one hot vector but remain differentiable. This model might come later so lets make it a later test. Pytorch has a function to do this called, torch.`nn.functional.gumbel_softmax`.
 2. Do we need the excitations to match? Test first with no matching excitation, just generated uniform noise in the same way. If this doesn't work try using the exact excitaiton that the matlab model was given.
-3. Next step in comparing pitch estimation and onset detection to the current differentiable algorithm for finding L.
-4. Another next step is including the `real` control parameters that a human controls (pluck position, pluck intensity, etc.).
+3. Convert the adaptive models to see if we can learn encoders for each parameter.
+4. Next step in comparing pitch estimation and onset detection to the current differentiable algorithm for finding L.
+5. Another next step is including the `real` control parameters that a human controls (pluck position, pluck intensity, etc.).
+6. Actually implement the clarinet model.
