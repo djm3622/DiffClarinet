@@ -17,12 +17,12 @@ class MatlabData(Dataset):
             if delay_gain:
                 gain = file_processing.seperate_out_delay_gain(wav_path)
                 t.append(gain)
-            if L:
-                delay = file_processing.seperate_out_L(wav_path)
-                t.append(delay)
             if a:
                 a_val = file_processing.seperate_out_a(wav_path)
                 t.append(a_val)
+            if L:
+                delay = file_processing.seperate_out_L(wav_path)
+                t.append(delay)
 
             self.audios.append(t)
             self.excs.append(exc)

@@ -1,22 +1,25 @@
 import os
 
 
+def _value_after_label(file_name: str, label: str) -> str:
+    stem = os.path.splitext(os.path.basename(file_name))[0]
+    fields = stem.split('_')
+
+    label_index = fields.index(label)
+    value = fields[label_index + 1]
+    return value
+
+
 def seperate_out_L(file_name: str) -> int:
-    no_post = file_name.split('.')[0]
-    L = no_post.split('_')[-1]
-    return int(L)
+    return int(_value_after_label(file_name, 'L'))
 
 
 def seperate_out_delay_gain(file_name: str) -> float:
-    no_post = ".".join(file_name.split('.')[:1+1])
-    delay_gain = no_post.split('_')[-1]
-    return float(delay_gain)
+    return float(_value_after_label(file_name, 'delay'))
 
 
 def seperate_out_a(file_name: str) -> float:
-    no_post = ".".join(file_name.split('.')[:1+1])
-    a = no_post.split('_')[-1]
-    return float(a)
+    return float(_value_after_label(file_name, 'a'))
 
 
 def seperate_out_seed(file_name: str) -> int:

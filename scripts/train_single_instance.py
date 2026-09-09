@@ -16,7 +16,7 @@ def main():
 
     # data setup
 
-    directory = "data/fixed_L/"
+    directory = "data/vary_fixed_k_a/"
 
     wav_paths = file_processing.get_files_in_dir_wav(directory)
     mat_paths = file_processing.get_files_in_dir_mat(directory)
@@ -24,8 +24,8 @@ def main():
     wav_paths = file_processing.sort_file_path_list(wav_paths)
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
-    train_indx = 0
-    all_plus_learnable = False
+    train_indx = 5622
+    all_plus_learnable = True
     delay_gain_learnable = True
     delay_len_learnable = False
 
@@ -44,7 +44,7 @@ def main():
 
     fixed = True
     L = 200
-    n_fft = 4096
+    n_fft = 8192
     rescale = False
     all_plus = True
     delay_gain = 0.99991
@@ -106,14 +106,14 @@ def main():
             print(f"Epoch [{e+1}/{epoch}], Loss: {log/len(train_dataloader)}")
 
     if delay_gain_learnable:
-        print(f"True delay gain: {train_dataloader.dataset.audios[0][-1]**L}")
-    elif all_plus_learnable:
-        print(f"True a: {train_dataloader.dataset.audios[0][-1]}")
+        print(f"True delay gain: {train_dataloader.dataset.audios[0][2]}")
+    if all_plus_learnable:
+        print(f"True a: {train_dataloader.dataset.audios[0][3]}")
 
     if fixed:
         if delay_gain_learnable:
             print(f"Learned delay gain: {model.scaled_gain().item()}")
-        elif all_plus_learnable:
+        if all_plus_learnable:
             print(f"Learned a: {model.scaled_allplus().item()}")
     else:
         if delay_gain_learnable:

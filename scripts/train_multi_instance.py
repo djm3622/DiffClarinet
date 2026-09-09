@@ -147,7 +147,7 @@ def main():
             lr=8e-5,
         )
 
-    epoch = 30
+    epoch = 100
     print_freq = 1
 
     """
@@ -165,7 +165,7 @@ def main():
 
     epoch_bar = tqdm(range(epoch), desc="Epochs")
 
-    run_dir = Path("output/new_run_1_in_dist_fixed_dataset_ordering")
+    run_dir = Path("output/new_run_1_in_dist_fixed_dataset_ordering_longer")
 
     run_dir.mkdir(parents=True, exist_ok=True)
 

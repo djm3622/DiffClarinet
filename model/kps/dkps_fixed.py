@@ -22,7 +22,8 @@ class KarplusStrongFixed(nn.Module):
         self.z = torch.exp(1j * torch.linspace(0, torch.pi, n_fft // 2 + 1))  # vectory of possible frequencies
 
         if self.delay_gain_learnable:
-            self.delay_gain = nn.Parameter(torch.tensor(delay_gain))
+            gain_tensor = torch.tensor(delay_gain, dtype=torch.get_default_dtype())
+            self.delay_gain = nn.Parameter(torch.logit(gain_tensor))
         else:
             self.delay_gain = delay_gain
 
