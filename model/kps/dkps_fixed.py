@@ -53,22 +53,16 @@ class KarplusStrongFixed(nn.Module):
                 )
             self.delay_len_min = delay_len_min
             self.delay_len_max = delay_len_max
-
-            if random_init:
-                self.delay_len = int(
-                    torch.randint(
-                        delay_len_min,
-                        delay_len_max + 1,
-                        (),
-                    ).item()
+            self.register_buffer(
+                "L_candidates",
+                torch.arange(delay_len_min, delay_len_max + 1),
+            )
+            self.L_logits = nn.Parameter(
+                torch.zeros(
+                    self.L_candidates.numel(),
+                    dtype=torch.get_default_dtype(),
                 )
-            else:
-                if not delay_len_min <= delay_len <= delay_len_max:
-                    raise ValueError(
-                        f"delay_len={delay_len} is outside the candidate "
-                        f"range [{delay_len_min}, {delay_len_max}]."
-                    )
-                self.delay_len = int(delay_len)
+            )
         else:
             self.delay_len = delay_len
 
@@ -87,23 +81,54 @@ class KarplusStrongFixed(nn.Module):
         return self.a
 
     def scaled_delay_len(self):
+        if self.delay_len_learnable:
+            delay_index = torch.argmax(self.L_logits)
+            return int(self.L_candidates[delay_index].item())
         return int(self.delay_len)
 
-    def set_delay_len(self, delay_len):
+    def delay_len_distribution(self):
         if not self.delay_len_learnable:
-            raise RuntimeError("delay_len is not configured for optimization.")
-        if not self.delay_len_min <= delay_len <= self.delay_len_max:
+            raise RuntimeError("delay_len is not configured for inference.")
+        return torch.distributions.Categorical(logits=self.L_logits)
+
+    def sample_delay_lengths(self, num_samples):
+        if num_samples < 1:
+            raise ValueError("num_samples must be at least 1.")
+        distribution = self.delay_len_distribution()
+        delay_indices = distribution.sample((num_samples,))
+        delay_lengths = [
+            int(delay_len.item())
+            for delay_len in self.L_candidates[delay_indices]
+        ]
+        return delay_lengths, distribution.log_prob(delay_indices)
+
+    def delay_len_probabilities(self):
+        return self.delay_len_distribution().probs
+
+    def delay_len_logit_smoothness(self):
+        if not self.delay_len_learnable:
+            raise RuntimeError("delay_len is not configured for inference.")
+        adjacent_differences = self.L_logits[1:] - self.L_logits[:-1]
+        return torch.mean(adjacent_differences.square())
+
+    def _resolve_delay_len(self, delay_len):
+        if delay_len is None:
+            return self.scaled_delay_len()
+        delay_len = int(delay_len)
+        if self.delay_len_learnable and not (
+            self.delay_len_min <= delay_len <= self.delay_len_max
+        ):
             raise ValueError(
                 f"delay_len={delay_len} is outside the candidate range "
                 f"[{self.delay_len_min}, {self.delay_len_max}]."
             )
-        self.delay_len = int(delay_len)
+        return delay_len
     
     # forward pass: synthesis in the frequency domain
-    def forward(self, noise):
+    def forward(self, noise, delay_len=None):
         noise = noise.flatten()
         z = self.z
-        delay_len = self.scaled_delay_len()
+        delay_len = self._resolve_delay_len(delay_len)
         exc = noise.new_zeros(self.n_fft)
         copied_samples = min(delay_len, self.n_fft, noise.numel())
         exc[:copied_samples] = noise[:copied_samples]
@@ -125,9 +150,9 @@ class KarplusStrongFixed(nn.Module):
         # apply filter to the input
         return exc_fft * numer / denom # circular convolution
 
-    def time_domain_synth(self, n_samples, noise):
+    def time_domain_synth(self, n_samples, noise, delay_len=None):
         noise = noise.flatten()
-        delay_len = self.scaled_delay_len()
+        delay_len = self._resolve_delay_len(delay_len)
         delay_gain = self.scaled_gain()
         a = self.scaled_allplus()
 

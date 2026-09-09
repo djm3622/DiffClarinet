@@ -20,43 +20,12 @@ def _scalar_value(value: float | torch.Tensor) -> float:
     return float(value)
 
 
-def _propose_delay_len(
-    current_delay_len: int,
-    delay_len_min: int,
-    delay_len_max: int,
-    global_proposal_probability: float,
-    rng: np.random.Generator,
-) -> int:
-    if rng.random() < global_proposal_probability:
-        return int(rng.integers(delay_len_min, delay_len_max + 1))
-
-    step = -1 if rng.random() < 0.5 else 1
-    return int(np.clip(
-        current_delay_len + step,
-        delay_len_min,
-        delay_len_max,
-    ))
-
-
-def _accept_delay_proposal(
-    current_loss: float,
-    proposed_loss: float,
-    temperature: float,
-    rng: np.random.Generator,
-) -> bool:
-    loss_increase = proposed_loss - current_loss
-    if loss_increase <= 0.0:
-        return True
-    return bool(rng.random() < np.exp(-loss_increase / temperature))
-
-
 def main() -> None:
     # data setup
 
     seed = 0
     np.random.seed(seed)
     torch.manual_seed(seed)
-    delay_rng = np.random.default_rng(seed)
     print(f"Random seed: {seed}")
 
     directory = "data/vary_fixed_k_a/"
@@ -67,7 +36,7 @@ def main() -> None:
     wav_paths = file_processing.sort_file_path_list(wav_paths)
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
-    train_indx = 5622
+    train_indx = 100
     all_plus_learnable = True
     delay_gain_learnable = True
     delay_len_learnable = True
@@ -96,9 +65,9 @@ def main() -> None:
 
     fixed = True
     circular = True
-    L = 200
     delay_len_min = 40
     delay_len_max = 240
+    L = delay_len_min  # ignored when L is learned; avoids GT initialization
     n_fft = 8192
     rescale = False
     all_plus = True
@@ -128,7 +97,10 @@ def main() -> None:
     if all_plus_learnable:
         print(f"Initial a: {_scalar_value(model.scaled_allplus())}")
     if delay_len_learnable:
-        print(f"Initial L: {model.scaled_delay_len()}")
+        print(
+            "Initial delay distribution: uniform over "
+            f"[{delay_len_min}, {delay_len_max}]"
+        )
 
     if fixed:
         init_synthesis_wav = model.time_domain_synth(T, exc).detach()
@@ -141,40 +113,57 @@ def main() -> None:
 
     # training
 
-    trainable_parameters = [
-        parameter for parameter in model.parameters()
-        if parameter.requires_grad
+    optimizer_parameter_groups = []
+    continuous_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and name != "L_logits"
     ]
-    optimizer = (
-        optim.Adam(trainable_parameters, lr=1e-2)
-        if trainable_parameters
-        else None
-    )
+    if continuous_parameters:
+        optimizer_parameter_groups.append({
+            "params": continuous_parameters,
+            "lr": 1e-2,
+        })
+    if delay_len_learnable:
+        optimizer_parameter_groups.append({
+            "params": [model.L_logits],
+            "lr": 3e-3,
+        })
+    optimizer = optim.Adam(optimizer_parameter_groups)
+
     epoch = 20000
     print_freq = 1000
-    initial_delay_temperature = 1.0
-    final_delay_temperature = 0.01
-    global_delay_proposal_probability = 0.1
+    num_delay_samples = 4
+    initial_uniform_prior_weight = 5e-2
+    final_uniform_prior_weight = 1e-3
+    advantage_clip = 5.0
+    ordinal_smoothness_weight = 1e-4
 
     if delay_len_learnable and not (fixed and circular):
         raise ValueError(
             "Discrete delay-length optimization requires fixed=True and "
             "circular=True."
         )
+    if delay_len_learnable and num_delay_samples < 2:
+        raise ValueError(
+            "Leave-one-out REINFORCE requires at least two delay samples."
+        )
 
     trajectory_gains = [_scalar_value(model.scaled_gain())]
     trajectory_a = [_scalar_value(model.scaled_allplus())]
     trajectory_delay_lengths = [model.scaled_delay_len()]
-    accepted_delay_moves = 0
-    attempted_delay_moves = 0
+    sampled_delay_lengths = None
 
     for e in range(epoch):
         log = 0
         progress = e / max(epoch - 1, 1)
-        delay_temperature = (
-            initial_delay_temperature
-            * (final_delay_temperature / initial_delay_temperature)
-            ** progress
+        uniform_prior_weight = (
+            initial_uniform_prior_weight
+            + progress
+            * (
+                final_uniform_prior_weight
+                - initial_uniform_prior_weight
+            )
         )
 
         for elements in train_dataloader:
@@ -185,17 +174,67 @@ def main() -> None:
             target_wave = audio[..., 1:1 + n_fft]
             target = fft.rfft(target_wave, n=n_fft).squeeze()
 
-            gradient_loss = None
-            if optimizer is not None:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
 
+            if fixed and circular and delay_len_learnable:
+                sampled_delay_lengths, delay_log_probabilities = (
+                    model.sample_delay_lengths(num_delay_samples)
+                )
+                reconstruction_losses = torch.stack([
+                    loss_fn(
+                        model(exc, delay_len=sampled_delay_len),
+                        target,
+                    )
+                    for sampled_delay_len in sampled_delay_lengths
+                ])
+                reconstruction_loss = reconstruction_losses.mean()
+
+                reconstruction_value = float(
+                    reconstruction_loss.detach().item()
+                )
+                detached_losses = reconstruction_losses.detach()
+                leave_one_out_baselines = (
+                    detached_losses.sum() - detached_losses
+                ) / (num_delay_samples - 1)
+                advantages = detached_losses - leave_one_out_baselines
+                advantage_scale = advantages.std(unbiased=False).clamp_min(
+                    1e-6
+                )
+                normalized_advantages = torch.clamp(
+                    advantages / advantage_scale,
+                    min=-advantage_clip,
+                    max=advantage_clip,
+                )
+                reinforce_loss = torch.mean(
+                    normalized_advantages * delay_log_probabilities
+                )
+
+                probabilities = model.delay_len_probabilities()
+                log_uniform_probability = -torch.log(
+                    probabilities.new_tensor(float(probabilities.numel()))
+                )
+                uniform_prior_kl = torch.sum(
+                    probabilities
+                    * (
+                        torch.log(probabilities.clamp_min(1e-12))
+                        - log_uniform_probability
+                    )
+                )
+                ordinal_smoothness = model.delay_len_logit_smoothness()
+                loss = (
+                    reconstruction_loss
+                    + reinforce_loss
+                    + uniform_prior_weight * uniform_prior_kl
+                    + ordinal_smoothness_weight * ordinal_smoothness
+                )
+            else:
                 if fixed and circular:
                     prediction = model(exc)
-                    gradient_loss = loss_fn(prediction, target)
+                    reconstruction_loss = loss_fn(prediction, target)
                 elif fixed:
                     prediction_wave = model.time_domain_synth(n_fft, exc)
                     prediction = fft.rfft(prediction_wave, n=n_fft)
-                    gradient_loss = loss_fn(prediction, target)
+                    reconstruction_loss = loss_fn(prediction, target)
                 else:
                     prediction_wave = model.time_domain_synth(
                         audio,
@@ -203,55 +242,20 @@ def main() -> None:
                         exc,
                     )
                     prediction = fft.rfft(prediction_wave, n=n_fft)
-                    gradient_loss = loss_fn(prediction, target)
-
-                gradient_loss.backward()
-                optimizer.step()
-
-            if delay_len_learnable:
-                current_delay_len = model.scaled_delay_len()
-                proposed_delay_len = _propose_delay_len(
-                    current_delay_len=current_delay_len,
-                    delay_len_min=delay_len_min,
-                    delay_len_max=delay_len_max,
-                    global_proposal_probability=(
-                        global_delay_proposal_probability
-                    ),
-                    rng=delay_rng,
+                    reconstruction_loss = loss_fn(prediction, target)
+                reconstruction_value = float(
+                    reconstruction_loss.detach().item()
                 )
+                loss = reconstruction_loss
 
-                with torch.no_grad():
-                    current_loss = float(loss_fn(model(exc), target).item())
-
-                    if proposed_delay_len != current_delay_len:
-                        attempted_delay_moves += 1
-                        model.set_delay_len(proposed_delay_len)
-                        proposed_loss = float(
-                            loss_fn(model(exc), target).item()
-                        )
-                        accepted = _accept_delay_proposal(
-                            current_loss=current_loss,
-                            proposed_loss=proposed_loss,
-                            temperature=delay_temperature,
-                            rng=delay_rng,
-                        )
-                        if accepted:
-                            accepted_delay_moves += 1
-                            current_loss = proposed_loss
-                        else:
-                            model.set_delay_len(current_delay_len)
-
-                loss_value = current_loss
-            elif gradient_loss is not None:
-                loss_value = float(gradient_loss.detach().item())
-            else:
-                raise RuntimeError("No trainable parameters were configured.")
+            loss.backward()
+            optimizer.step()
 
             trajectory_gains.append(_scalar_value(model.scaled_gain()))
             trajectory_a.append(_scalar_value(model.scaled_allplus()))
             trajectory_delay_lengths.append(model.scaled_delay_len())
 
-            log += loss_value
+            log += reconstruction_value
 
         if (e + 1) % print_freq == 0:
             print(
@@ -259,15 +263,23 @@ def main() -> None:
                 f"Loss: {log/len(train_dataloader)}"
             )
             if delay_len_learnable:
-                acceptance_rate = (
-                    accepted_delay_moves / attempted_delay_moves
-                    if attempted_delay_moves
-                    else 0.0
+                probabilities = model.delay_len_probabilities().detach()
+                top_probabilities, top_indices = torch.topk(
+                    probabilities,
+                    k=min(5, probabilities.numel()),
+                )
+                top_delays = model.L_candidates[top_indices]
+                top_summary = ", ".join(
+                    f"L={int(delay)}: {float(probability):.4f}"
+                    for delay, probability in zip(
+                        top_delays,
+                        top_probabilities,
+                    )
                 )
                 print(
-                    f"Delay length: {model.scaled_delay_len()}; "
-                    f"temperature={delay_temperature:.4f}; "
-                    f"acceptance_rate={acceptance_rate:.4f}"
+                    f"Delay distribution: {top_summary}; "
+                    f"sampled_L={sampled_delay_lengths}; "
+                    f"prior_weight={uniform_prior_weight:.5f}"
                 )
 
     if delay_gain_learnable:
