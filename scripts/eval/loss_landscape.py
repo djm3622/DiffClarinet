@@ -2,63 +2,12 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchaudio
-
-from data import preprocessing
-from data.helpers.file_processing import seperate_out_L, seperate_out_a
-from data.helpers.file_processing import seperate_out_delay_gain
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Plot the loss landscape over physical delay-gain and a values."
-    )
-    parser.add_argument("--wav", type=Path, required=True)
-    parser.add_argument(
-        "--mat",
-        type=Path,
-        help="Excitation MAT file. Defaults to the WAV path with a .mat suffix.",
-    )
-    parser.add_argument("--n-fft", type=int, default=8192)
-    parser.add_argument("--gain-min", type=float, default=0.05)
-    parser.add_argument("--gain-max", type=float, default=0.99)
-    parser.add_argument("--a-min", type=float, default=0.01)
-    parser.add_argument("--a-max", type=float, default=0.99)
-    parser.add_argument("--gain-steps", type=int, default=81)
-    parser.add_argument("--a-steps", type=int, default=81)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--skip-leading-samples", type=int, default=1)
-    parser.add_argument("--learned-gain", type=float)
-    parser.add_argument("--learned-a", type=float)
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("output/loss_landscape.png"),
-    )
-    return parser.parse_args()
-
-
-def _validate_args(args: argparse.Namespace) -> None:
-    if not 0.0 < args.gain_min < args.gain_max < 1.0:
-        raise ValueError("Expected 0 < gain-min < gain-max < 1.")
-    if not 0.0 < args.a_min < args.a_max < 1.0:
-        raise ValueError("Expected 0 < a-min < a-max < 1.")
-    if args.gain_steps < 2 or args.a_steps < 2:
-        raise ValueError("Both grid dimensions must contain at least two points.")
-    if args.batch_size < 1:
-        raise ValueError("batch-size must be positive.")
-    if args.n_fft < 1:
-        raise ValueError("n-fft must be positive.")
-    if args.skip_leading_samples < 0:
-        raise ValueError("skip-leading-samples cannot be negative.")
-    if (args.learned_gain is None) != (args.learned_a is None):
-        raise ValueError("Provide both --learned-gain and --learned-a, or neither.")
 
 
 def _synthesize_grid_batch(
@@ -154,9 +103,14 @@ def plot_loss_landscape(
     true_gain: float,
     true_a: float,
     output_path: Path,
-    learned_gain: float | None = None,
-    learned_a: float | None = None,
+    trajectory_gains: np.ndarray,
+    trajectory_a: np.ndarray,
 ) -> None:
+    if trajectory_gains.shape != trajectory_a.shape:
+        raise ValueError("Trajectory gain and a arrays must have matching shapes.")
+    if trajectory_gains.size == 0:
+        raise ValueError("Trajectory arrays cannot be empty.")
+
     positive_losses = losses[losses > 0.0]
     color_floor = max(float(positive_losses.min()), np.finfo(np.float32).tiny)
     log_losses = np.log10(np.maximum(losses, color_floor))
@@ -173,7 +127,7 @@ def plot_loss_landscape(
         cmap="viridis",
     )
     colorbar = figure.colorbar(image, ax=axis)
-    colorbar.set_label("log10 normalized log-magnitude loss")
+    colorbar.set_label("Objective")
 
     axis.scatter(
         true_gain,
@@ -183,104 +137,82 @@ def plot_loss_landscape(
         color="white",
         edgecolor="black",
         linewidth=0.8,
-        label="True parameters",
+        label="True Parameters",
         zorder=3,
     )
     axis.scatter(
         minimum_gain,
         minimum_a,
-        marker="x",
-        s=80,
+        marker="D",
+        s=55,
         color="red",
-        linewidth=2.0,
-        label="Grid minimum",
+        edgecolor="white",
+        linewidth=0.8,
+        label="Grid Minimum",
         zorder=3,
     )
-    if learned_gain is not None and learned_a is not None:
-        axis.scatter(
-            learned_gain,
-            learned_a,
-            marker="o",
-            s=70,
-            facecolor="none",
-            edgecolor="orange",
-            linewidth=2.0,
-            label="Learned parameters",
-            zorder=3,
-        )
+    axis.plot(
+        trajectory_gains,
+        trajectory_a,
+        color="white",
+        linewidth=2.5,
+        alpha=0.9,
+        zorder=2,
+    )
+    axis.plot(
+        trajectory_gains,
+        trajectory_a,
+        color="black",
+        linewidth=0.8,
+        alpha=0.9,
+        label="Optimization Path",
+        zorder=2,
+    )
+    axis.scatter(
+        trajectory_gains[0],
+        trajectory_a[0],
+        marker="o",
+        s=55,
+        color="white",
+        edgecolor="black",
+        label="Initial Parameters",
+        zorder=4,
+    )
+    axis.scatter(
+        trajectory_gains[-1],
+        trajectory_a[-1],
+        marker="o",
+        s=55,
+        color="orange",
+        edgecolor="black",
+        label="Final Parameters",
+        zorder=4,
+    )
 
-    axis.set_xlabel("Loop gain k")
-    axis.set_ylabel("All-pass coefficient a")
-    axis.set_title("Single-instance loss landscape")
-    axis.legend()
-    figure.tight_layout()
+    axis.set_xlabel("$k$")
+    axis.set_ylabel("$a$")
+    handles, labels = axis.get_legend_handles_labels()
+    legend_order = [0, 3, 1, 4, 2]
+
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.85))
+    plot_position = axis.get_position()
+    legend_left = plot_position.x0
+    legend_bottom = plot_position.y1 + 0.015
+    legend_width = plot_position.width
+
+    figure.legend(
+        [handles[index] for index in legend_order],
+        [labels[index] for index in legend_order],
+        loc="lower left",
+        bbox_to_anchor=(legend_left, legend_bottom, legend_width, 0.1),
+        bbox_transform=figure.transFigure,
+        mode="expand",
+        ncol=3,
+        frameon=False,
+        columnspacing=1.2,
+        handletextpad=0.6,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()
     plt.close(figure)
-
-
-def main() -> None:
-    args = _parse_args()
-    _validate_args(args)
-
-    mat_path = args.mat if args.mat is not None else args.wav.with_suffix(".mat")
-    waveform, _ = preprocessing.load_target_waveforms(str(args.wav))
-    excitation = preprocessing.load_excitations(str(mat_path)).squeeze()
-
-    start = args.skip_leading_samples
-    stop = start + args.n_fft
-    target_waveform = waveform.squeeze(0)[start:stop]
-    if target_waveform.numel() != args.n_fft:
-        raise ValueError(
-            f"Requested {args.n_fft} target samples after skipping {start}, "
-            f"but only {target_waveform.numel()} are available."
-        )
-
-    true_gain = seperate_out_delay_gain(str(args.wav))
-    true_a = seperate_out_a(str(args.wav))
-    delay_length = seperate_out_L(str(args.wav))
-    gains = torch.linspace(args.gain_min, args.gain_max, args.gain_steps)
-    allpass_values = torch.linspace(args.a_min, args.a_max, args.a_steps)
-
-    losses = evaluate_loss_landscape(
-        target_waveform=target_waveform,
-        excitation=excitation,
-        gains=gains,
-        allpass_values=allpass_values,
-        delay_length=delay_length,
-        batch_size=args.batch_size,
-    )
-
-    plot_loss_landscape(
-        gains=gains.numpy(),
-        allpass_values=allpass_values.numpy(),
-        losses=losses.numpy(),
-        true_gain=true_gain,
-        true_a=true_a,
-        learned_gain=args.learned_gain,
-        learned_a=args.learned_a,
-        output_path=args.output,
-    )
-
-    data_path = args.output.with_suffix(".npz")
-    np.savez_compressed(
-        data_path,
-        gains=gains.numpy(),
-        allpass_values=allpass_values.numpy(),
-        losses=losses.numpy(),
-        true_gain=true_gain,
-        true_a=true_a,
-    )
-    minimum_index = np.unravel_index(np.argmin(losses.numpy()), losses.shape)
-    print(f"Saved plot: {args.output}")
-    print(f"Saved grid: {data_path}")
-    print(
-        "Grid minimum: "
-        f"loss={losses[minimum_index].item():.6g}, "
-        f"gain={gains[minimum_index[1]].item():.6g}, "
-        f"a={allpass_values[minimum_index[0]].item():.6g}"
-    )
-
-
-if __name__ == "__main__":
-    main()

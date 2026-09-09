@@ -7,7 +7,7 @@ class KarplusStrongFixed(nn.Module):
     def __init__(
         self, delay_len, n_fft=2048, rescale=False, all_plus=True,
         all_plus_learnable=True, delay_gain_learnable=False,
-        delay_gain=0.99991, a=0.1
+        delay_gain=0.99991, a=0.1, random_init=True
     ):
         super().__init__()
         self.delay_len = delay_len
@@ -22,13 +22,25 @@ class KarplusStrongFixed(nn.Module):
         self.z = torch.exp(1j * torch.linspace(0, torch.pi, n_fft // 2 + 1))  # vectory of possible frequencies
 
         if self.delay_gain_learnable:
-            gain_tensor = torch.tensor(delay_gain, dtype=torch.get_default_dtype())
+            if random_init:
+                gain_tensor = torch.rand(
+                    (), dtype=torch.get_default_dtype()
+                ).clamp_(1e-6, 1.0 - 1e-6)
+            else:
+                gain_tensor = torch.tensor(
+                    delay_gain, dtype=torch.get_default_dtype()
+                )
             self.delay_gain = nn.Parameter(torch.logit(gain_tensor))
         else:
             self.delay_gain = delay_gain
 
         if self.all_plus_learnable:
-            a_tensor = torch.tensor(a, dtype=torch.get_default_dtype())
+            if random_init:
+                a_tensor = torch.rand(
+                    (), dtype=torch.get_default_dtype()
+                ).clamp_(1e-6, 1.0 - 1e-6)
+            else:
+                a_tensor = torch.tensor(a, dtype=torch.get_default_dtype())
             self.a = nn.Parameter(torch.logit(a_tensor))
         else:
             self.a = a

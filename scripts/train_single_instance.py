@@ -1,19 +1,20 @@
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch import fft, optim
+from torch.utils.data import DataLoader
+
+from data.dataset import MatlabData
+from data.helpers import file_processing
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
 from model.kps.objectives.frequency import to_log_mag, loss_fn
 
-from data.dataset import MatlabData
-from data.helpers import file_processing
+from .eval import listening, loss_landscape, plots
 
-from .eval import listening, plots
 
-from torch.utils.data import DataLoader
-
-from torch import fft
-from torch import optim
-
-def main():
-
+def main() -> None:
     # data setup
 
     directory = "data/vary_fixed_k_a/"
@@ -44,11 +45,12 @@ def main():
 
     fixed = True
     L = 200
-    n_fft = 8192
+    n_fft = 2048
     rescale = False
     all_plus = True
     delay_gain = 0.99991
     a = 0.1
+    random_init = True
     T = 40000
 
     model = None
@@ -57,13 +59,16 @@ def main():
         model = KarplusStrongFixed(
             delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus,
             all_plus_learnable=all_plus_learnable, delay_gain_learnable=delay_gain_learnable,
-            delay_gain=delay_gain, a=a
+            delay_gain=delay_gain, a=a, random_init=random_init
         )
     else:
         model = KarplusStrongAdaptive(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
 
     test_audio = train_dataset[0][0].squeeze(0)
     exc = train_dataset[0][-1].squeeze(0)
+
+    print(f"Initial delay gain: {model.scaled_gain().item()}")
+    print(f"Initial a: {model.scaled_allplus().item()}")
 
     if fixed:
         init_synthesis_wav = model.time_domain_synth(T, exc).detach()
@@ -76,6 +81,9 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
     epoch = 10000
     print_freq = 1000
+
+    trajectory_gains = [model.scaled_gain().item()]
+    trajectory_a = [model.scaled_allplus().item()]
 
     for e in range(epoch):
         log = 0
@@ -100,6 +108,9 @@ def main():
             loss.backward()
             optimizer.step()
 
+            trajectory_gains.append(model.scaled_gain().item())
+            trajectory_a.append(model.scaled_allplus().item())
+
             log += loss.item()
 
         if (e + 1) % print_freq == 0:
@@ -121,6 +132,29 @@ def main():
         else:
             pass
 
+    landscape_gains = torch.linspace(0.05, 0.99999, 201)
+    landscape_a = torch.linspace(0.01, 0.99, 201)
+    landscape_losses = loss_landscape.evaluate_loss_landscape(
+        target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
+        excitation=train_dataset[0][-1].squeeze(0),
+        gains=landscape_gains,
+        allpass_values=landscape_a,
+        delay_length=L,
+        batch_size=64,
+    )
+    landscape_path = Path(f"output/loss_landscape_nfft_{n_fft}.png")
+    loss_landscape.plot_loss_landscape(
+        gains=landscape_gains.numpy(),
+        allpass_values=landscape_a.numpy(),
+        losses=landscape_losses.numpy(),
+        true_gain=train_dataloader.dataset.audios[0][2],
+        true_a=train_dataloader.dataset.audios[0][3],
+        trajectory_gains=np.asarray(trajectory_gains),
+        trajectory_a=np.asarray(trajectory_a),
+        output_path=landscape_path,
+    )
+    print(f"Saved loss landscape: {landscape_path}")
+
     sr = train_dataloader.dataset.audios[0][1]
     audio_waveform = train_dataloader.dataset.audios[0][0].squeeze(0)
     audio = fft.rfft(audio_waveform[1:1 + n_fft], n=n_fft)
@@ -134,7 +168,7 @@ def main():
     fftfreqs = fft.rfftfreq(n_fft, 1 / sr)
     plots.plot_frequency_response(fftfreqs, to_log_mag(audio), to_log_mag(init_synthesis), to_log_mag(current))
 
-    output_directory = 'output/'
+    output_directory = "output/"
 
     listening.save_audio(output_directory + "target.wav", audio_waveform, sr)
     listening.save_audio(output_directory + "initial_synthesis.wav", init_synthesis_wav, sr)
