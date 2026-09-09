@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchaudio
+from matplotlib import cm, colors
 
 
 def _synthesize_grid_batch(
@@ -19,14 +20,9 @@ def _synthesize_grid_batch(
 ) -> torch.Tensor:
     batch_size = gains.numel()
     excitation = excitation.flatten()
-    if excitation.numel() != delay_length:
-        raise ValueError(
-            f"Expected excitation length {delay_length}, "
-            f"but received {excitation.numel()}."
-        )
 
     signals = excitation.new_zeros(batch_size, n_samples)
-    copied_samples = min(delay_length, n_samples)
+    copied_samples = min(delay_length, n_samples, excitation.numel())
     signals[:, :copied_samples] = excitation[:copied_samples]
 
     coefficient_count = delay_length + 3
@@ -94,6 +90,211 @@ def evaluate_loss_landscape(
             losses.append(batch_losses.cpu())
 
     return torch.cat(losses).reshape(allpass_values.numel(), gains.numel())
+
+
+def evaluate_circular_loss_volume(
+    target_waveform: torch.Tensor,
+    excitation: torch.Tensor,
+    gains: torch.Tensor,
+    allpass_values: torch.Tensor,
+    delay_lengths: torch.Tensor,
+    n_fft: int,
+    batch_size: int,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Return a circular-objective loss volume shaped ``[L, a, gain]``."""
+    excitation = excitation.flatten()
+
+    target_spectrum = torch.fft.rfft(target_waveform, n=n_fft)
+    target_magnitude = target_spectrum.abs()
+    target_log_magnitude = 10.0 * torch.log10(
+        target_magnitude / target_magnitude.max() + eps
+    )
+
+    z = torch.exp(
+        1j * torch.linspace(
+            0.0,
+            torch.pi,
+            n_fft // 2 + 1,
+            device=excitation.device,
+        )
+    )
+    gain_grid, a_grid = torch.meshgrid(gains, allpass_values, indexing="xy")
+    flat_gains = gain_grid.flatten().to(excitation.device)
+    flat_a = a_grid.flatten().to(excitation.device)
+    losses_by_delay = []
+
+    with torch.no_grad():
+        for delay_length_tensor in delay_lengths:
+            delay_length = int(delay_length_tensor.item())
+            signal = excitation.new_zeros(n_fft)
+            copied_samples = min(delay_length, n_fft, excitation.numel())
+            signal[:copied_samples] = excitation[:copied_samples]
+            excitation_spectrum = torch.fft.rfft(signal, n=n_fft)
+            delay_losses = []
+
+            for start in range(0, flat_gains.numel(), batch_size):
+                stop = min(start + batch_size, flat_gains.numel())
+                batch_gains = flat_gains[start:stop].unsqueeze(1)
+                batch_a = flat_a[start:stop].unsqueeze(1)
+
+                numerator = (
+                    0.5 * z.pow(-2)
+                    + (batch_a + 1.0) / 2.0 * z.pow(-1)
+                    + batch_a / 2.0
+                )
+                denominator = (
+                    -batch_gains / 2.0 * z.pow(-(delay_length + 2))
+                    -batch_gains * (batch_a + 1.0) / 2.0
+                    * z.pow(-(delay_length + 1))
+                    -batch_gains * batch_a / 2.0 * z.pow(-delay_length)
+                    + batch_a * z.pow(-1)
+                    + 1.0
+                )
+                predictions = excitation_spectrum * numerator / denominator
+                prediction_magnitude = predictions.abs()
+                prediction_log_magnitude = 10.0 * torch.log10(
+                    prediction_magnitude
+                    / prediction_magnitude.amax(dim=-1, keepdim=True)
+                    + eps
+                )
+                batch_losses = (
+                    prediction_log_magnitude - target_log_magnitude
+                ).abs().mean(dim=-1)
+                delay_losses.append(batch_losses.cpu())
+
+            losses_by_delay.append(
+                torch.cat(delay_losses).reshape(
+                    allpass_values.numel(),
+                    gains.numel(),
+                )
+            )
+
+    return torch.stack(losses_by_delay)
+
+
+def plot_3d_loss_volume(
+    gains: np.ndarray,
+    allpass_values: np.ndarray,
+    delay_lengths: np.ndarray,
+    losses: np.ndarray,
+    true_gain: float,
+    true_a: float,
+    true_delay_length: int,
+    output_path: Path,
+    trajectory_gains: np.ndarray,
+    trajectory_a: np.ndarray,
+    trajectory_delay_lengths: np.ndarray,
+) -> None:
+    """Plot one translucent circular-loss slice per sampled gain value."""
+    expected_shape = (
+        delay_lengths.size,
+        allpass_values.size,
+        gains.size,
+    )
+    if losses.shape != expected_shape:
+        raise ValueError(
+            f"Expected loss shape {expected_shape}, but received {losses.shape}."
+        )
+
+    finite_indices = np.flatnonzero(np.isfinite(losses.ravel()))
+    if finite_indices.size == 0:
+        raise ValueError("The loss volume contains no finite values.")
+    finite_losses = losses.ravel()[finite_indices]
+
+    positive_losses = finite_losses[finite_losses > 0.0]
+    color_floor = (
+        float(positive_losses.min())
+        if positive_losses.size
+        else np.finfo(np.float32).tiny
+    )
+    log_losses = np.log10(np.maximum(losses, color_floor))
+    finite_log_losses = log_losses[np.isfinite(log_losses)]
+    color_norm = colors.Normalize(
+        vmin=float(finite_log_losses.min()),
+        vmax=float(finite_log_losses.max()),
+    )
+    color_map = plt.get_cmap("viridis_r")
+    minimum_flat_index = finite_indices[np.argmin(finite_losses)]
+    minimum_index = np.unravel_index(minimum_flat_index, losses.shape)
+    minimum_delay = delay_lengths[minimum_index[0]]
+    minimum_a = allpass_values[minimum_index[1]]
+    minimum_gain = gains[minimum_index[2]]
+
+    figure = plt.figure(figsize=(10, 8))
+    volume_axis = figure.add_axes(
+        [0.02, 0.05, 0.76, 0.9],
+        projection="3d",
+    )
+    a_mesh, delay_mesh = np.meshgrid(allpass_values, delay_lengths)
+    for gain_index, gain in enumerate(gains):
+        gain_slice = np.full_like(a_mesh, gain, dtype=np.float64)
+        face_colors = color_map(color_norm(log_losses[:, :, gain_index]))
+        volume_axis.plot_surface(
+            gain_slice,
+            a_mesh,
+            delay_mesh,
+            facecolors=face_colors,
+            linewidth=0.0,
+            antialiased=True,
+            shade=False,
+            alpha=0.12,
+        )
+
+    colorbar_axis = figure.add_axes([0.86, 0.2, 0.025, 0.6])
+    color_mappable = cm.ScalarMappable(norm=color_norm, cmap=color_map)
+    color_mappable.set_array([])
+    figure.colorbar(
+        color_mappable,
+        cax=colorbar_axis,
+        label="log10 objective",
+    )
+    volume_axis.scatter(
+        true_gain,
+        true_a,
+        true_delay_length,
+        marker="*",
+        s=180,
+        color="white",
+        edgecolor="black",
+        label="True parameters",
+    )
+    volume_axis.scatter(
+        minimum_gain,
+        minimum_a,
+        minimum_delay,
+        marker="D",
+        s=55,
+        color="red",
+        edgecolor="black",
+        label="Grid minimum",
+    )
+
+    trajectory_size = trajectory_gains.size
+    if not (
+        trajectory_a.size == trajectory_size
+        and trajectory_delay_lengths.size == trajectory_size
+    ):
+        raise ValueError("All trajectory arrays must have matching lengths.")
+    trajectory_stride = max(1, trajectory_size // 500)
+    volume_axis.plot(
+        trajectory_gains[::trajectory_stride],
+        trajectory_a[::trajectory_stride],
+        trajectory_delay_lengths[::trajectory_stride],
+        color="black",
+        linewidth=1.0,
+        alpha=0.8,
+        label="Argmax trajectory",
+    )
+    volume_axis.set_xlabel("$k$")
+    volume_axis.set_ylabel("$a$")
+    volume_axis.set_zlabel("$L$", labelpad=10)
+    volume_axis.legend(loc="upper left")
+    volume_axis.view_init(elev=24, azim=-58)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()
+    plt.close(figure)
 
 
 def plot_loss_landscape(

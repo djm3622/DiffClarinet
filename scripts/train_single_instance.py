@@ -14,8 +14,19 @@ from model.kps.objectives.frequency import to_log_mag, loss_fn
 from .eval import listening, loss_landscape, plots
 
 
+def _scalar_value(value: float | torch.Tensor) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().item())
+    return float(value)
+
+
 def main() -> None:
     # data setup
+
+    seed = 2
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"Random seed: {seed}")
 
     directory = "data/vary_fixed_k_a/"
 
@@ -26,9 +37,9 @@ def main() -> None:
     mat_paths = file_processing.sort_file_path_list(mat_paths)
 
     train_indx = 5622
-    all_plus_learnable = True
-    delay_gain_learnable = True
-    delay_len_learnable = False
+    all_plus_learnable = False
+    delay_gain_learnable = False
+    delay_len_learnable = True
 
     train_wav_paths = wav_paths[train_indx:train_indx+1]
     train_mat_paths = mat_paths[train_indx:train_indx+1]
@@ -37,19 +48,31 @@ def main() -> None:
 
     train_dataset = MatlabData(
         train_wav_paths, train_mat_paths, 
-        delay_gain=delay_gain_learnable, L=delay_len_learnable, a=all_plus_learnable
+        delay_gain=True, L=True, a=True
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    data_generator = torch.Generator().manual_seed(seed)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=1,
+        shuffle=True,
+        generator=data_generator,
+    )
+    true_delay_gain = float(train_dataset.audios[0][2])
+    true_a = float(train_dataset.audios[0][3])
+    true_delay_len = int(train_dataset.audios[0][4])
 
     # model setup
 
     fixed = True
+    circular = True  # analytic response permits straight-through gradients for L
     L = 200
-    n_fft = 2048
+    delay_len_min = 40
+    delay_len_max = 240
+    n_fft = 8192
     rescale = False
     all_plus = True
-    delay_gain = 0.99991
-    a = 0.1
+    delay_gain = 0.99991 if delay_gain_learnable else true_delay_gain
+    a = 0.1 if all_plus_learnable else true_a
     random_init = True
     T = 40000
 
@@ -59,7 +82,9 @@ def main() -> None:
         model = KarplusStrongFixed(
             delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus,
             all_plus_learnable=all_plus_learnable, delay_gain_learnable=delay_gain_learnable,
-            delay_gain=delay_gain, a=a, random_init=random_init
+            delay_len_learnable=delay_len_learnable, delay_gain=delay_gain,
+            a=a, random_init=random_init, delay_len_min=delay_len_min,
+            delay_len_max=delay_len_max,
         )
     else:
         model = KarplusStrongAdaptive(delay_len=L, n_fft=n_fft, rescale=rescale, all_plus=all_plus, a=a)
@@ -67,23 +92,31 @@ def main() -> None:
     test_audio = train_dataset[0][0].squeeze(0)
     exc = train_dataset[0][-1].squeeze(0)
 
-    print(f"Initial delay gain: {model.scaled_gain().item()}")
-    print(f"Initial a: {model.scaled_allplus().item()}")
+    if delay_gain_learnable:
+        print(f"Initial delay gain: {_scalar_value(model.scaled_gain())}")
+    if all_plus_learnable:
+        print(f"Initial a: {_scalar_value(model.scaled_allplus())}")
+    if delay_len_learnable:
+        print(f"Initial L: {model.scaled_delay_len()}")
 
     if fixed:
         init_synthesis_wav = model.time_domain_synth(T, exc).detach()
     else:
         init_synthesis_wav = model.time_domain_synth(test_audio, T, exc).detach()
-    init_synthesis = fft.rfft(init_synthesis_wav[:n_fft], n=n_fft)
+    if fixed and circular:
+        init_synthesis = model(exc).detach()
+    else:
+        init_synthesis = fft.rfft(init_synthesis_wav[:n_fft], n=n_fft)
 
     # training
 
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
-    epoch = 10000
+    epoch = 20000
     print_freq = 1000
 
-    trajectory_gains = [model.scaled_gain().item()]
-    trajectory_a = [model.scaled_allplus().item()]
+    trajectory_gains = [_scalar_value(model.scaled_gain())]
+    trajectory_a = [_scalar_value(model.scaled_allplus())]
+    trajectory_delay_lengths = [model.scaled_delay_len()]
 
     for e in range(epoch):
         log = 0
@@ -97,63 +130,136 @@ def main() -> None:
 
             optimizer.zero_grad()
 
-            if fixed:
+            if fixed and circular:
+                prediction = model(exc)
+                loss = loss_fn(prediction, target)
+            elif fixed:
                 prediction_wave = model.time_domain_synth(n_fft, exc)
+                prediction = fft.rfft(prediction_wave, n=n_fft)
+                loss = loss_fn(prediction, target)
             else:
                 prediction_wave = model.time_domain_synth(audio, n_fft, exc)
-
-            prediction = fft.rfft(prediction_wave, n=n_fft)
-            loss = loss_fn(prediction, target)
+                prediction = fft.rfft(prediction_wave, n=n_fft)
+                loss = loss_fn(prediction, target)
 
             loss.backward()
             optimizer.step()
 
-            trajectory_gains.append(model.scaled_gain().item())
-            trajectory_a.append(model.scaled_allplus().item())
+            trajectory_gains.append(_scalar_value(model.scaled_gain()))
+            trajectory_a.append(_scalar_value(model.scaled_allplus()))
+            trajectory_delay_lengths.append(model.scaled_delay_len())
 
             log += loss.item()
 
         if (e + 1) % print_freq == 0:
-            print(f"Epoch [{e+1}/{epoch}], Loss: {log/len(train_dataloader)}")
+            print(
+                f"Epoch [{e+1}/{epoch}], "
+                f"Loss: {log/len(train_dataloader)}"
+            )
+            if delay_len_learnable:
+                print(
+                    "Delay length: "
+                    f"continuous={_scalar_value(model.continuous_delay_len()):.4f}; "
+                    f"discrete={model.scaled_delay_len()}"
+                )
 
     if delay_gain_learnable:
-        print(f"True delay gain: {train_dataloader.dataset.audios[0][2]}")
+        print(f"True delay gain: {true_delay_gain}")
     if all_plus_learnable:
-        print(f"True a: {train_dataloader.dataset.audios[0][3]}")
+        print(f"True a: {true_a}")
+    if delay_len_learnable:
+        print(f"True L: {true_delay_len}")
 
     if fixed:
         if delay_gain_learnable:
-            print(f"Learned delay gain: {model.scaled_gain().item()}")
+            print(f"Learned delay gain: {_scalar_value(model.scaled_gain())}")
         if all_plus_learnable:
-            print(f"Learned a: {model.scaled_allplus().item()}")
+            print(f"Learned a: {_scalar_value(model.scaled_allplus())}")
+        if delay_len_learnable:
+            print(f"Learned L: {model.scaled_delay_len()}")
     else:
         if delay_gain_learnable:
             print(f"Learned delay gain: {model.scaled_gain(test_audio).item()}")
         else:
             pass
 
-    landscape_gains = torch.linspace(0.05, 0.99999, 201)
-    landscape_a = torch.linspace(0.01, 0.99, 201)
-    landscape_losses = loss_landscape.evaluate_loss_landscape(
-        target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
-        excitation=train_dataset[0][-1].squeeze(0),
-        gains=landscape_gains,
-        allpass_values=landscape_a,
-        delay_length=L,
-        batch_size=64,
-    )
+    landscape_gains = torch.linspace(0.0, 0.99999, 201)
+    landscape_a = torch.linspace(0.0, 1.0, 201)
+    landscape_delay_len = model.scaled_delay_len() if fixed else L
+    if circular:
+        landscape_losses = loss_landscape.evaluate_circular_loss_volume(
+            target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
+            excitation=train_dataset[0][-1].squeeze(0),
+            gains=landscape_gains,
+            allpass_values=landscape_a,
+            delay_lengths=torch.tensor([landscape_delay_len]),
+            n_fft=n_fft,
+            batch_size=256,
+        )[0]
+    else:
+        landscape_losses = loss_landscape.evaluate_loss_landscape(
+            target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
+            excitation=train_dataset[0][-1].squeeze(0)[:landscape_delay_len],
+            gains=landscape_gains,
+            allpass_values=landscape_a,
+            delay_length=landscape_delay_len,
+            batch_size=64,
+        )
     landscape_path = Path(f"output/loss_landscape_nfft_{n_fft}.png")
     loss_landscape.plot_loss_landscape(
         gains=landscape_gains.numpy(),
         allpass_values=landscape_a.numpy(),
         losses=landscape_losses.numpy(),
-        true_gain=train_dataloader.dataset.audios[0][2],
-        true_a=train_dataloader.dataset.audios[0][3],
+        true_gain=true_delay_gain,
+        true_a=true_a,
         trajectory_gains=np.asarray(trajectory_gains),
         trajectory_a=np.asarray(trajectory_a),
         output_path=landscape_path,
     )
     print(f"Saved loss landscape: {landscape_path}")
+
+    if fixed and delay_len_learnable and circular:
+        volume_gains = torch.linspace(0.0, 0.99999, 31)
+        volume_a = torch.linspace(0.0, 1.0, 31)
+        volume_delay_lengths = torch.arange(
+            delay_len_min,
+            delay_len_max + 1,
+        )
+        volume_losses = loss_landscape.evaluate_circular_loss_volume(
+            target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
+            excitation=train_dataset[0][-1].squeeze(0),
+            gains=volume_gains,
+            allpass_values=volume_a,
+            delay_lengths=volume_delay_lengths,
+            n_fft=n_fft,
+            batch_size=256,
+        )
+        volume_path = Path(f"output/loss_landscape_3d_nfft_{n_fft}.png")
+        loss_landscape.plot_3d_loss_volume(
+            gains=volume_gains.numpy(),
+            allpass_values=volume_a.numpy(),
+            delay_lengths=volume_delay_lengths.numpy(),
+            losses=volume_losses.numpy(),
+            true_gain=true_delay_gain,
+            true_a=true_a,
+            true_delay_length=true_delay_len,
+            output_path=volume_path,
+            trajectory_gains=np.asarray(trajectory_gains),
+            trajectory_a=np.asarray(trajectory_a),
+            trajectory_delay_lengths=np.asarray(trajectory_delay_lengths),
+        )
+        volume_data_path = Path(
+            f"output/loss_landscape_3d_nfft_{n_fft}.npz"
+        )
+        np.savez_compressed(
+            volume_data_path,
+            gains=volume_gains.numpy(),
+            allpass_values=volume_a.numpy(),
+            delay_lengths=volume_delay_lengths.numpy(),
+            losses=volume_losses.numpy(),
+        )
+        print(f"Saved 3D loss landscape: {volume_path}")
+        print(f"Saved 3D loss data: {volume_data_path}")
 
     sr = train_dataloader.dataset.audios[0][1]
     audio_waveform = train_dataloader.dataset.audios[0][0].squeeze(0)
@@ -163,7 +269,10 @@ def main() -> None:
         current_wave = model.time_domain_synth(T, exc).detach()
     else:
         current_wave = model.time_domain_synth(test_audio, T, exc).detach()
-    current = fft.rfft(current_wave[:n_fft], n=n_fft)
+    if fixed and circular:
+        current = model(exc).detach()
+    else:
+        current = fft.rfft(current_wave[:n_fft], n=n_fft)
 
     fftfreqs = fft.rfftfreq(n_fft, 1 / sr)
     plots.plot_frequency_response(fftfreqs, to_log_mag(audio), to_log_mag(init_synthesis), to_log_mag(current))
