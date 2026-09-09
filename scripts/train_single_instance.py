@@ -22,6 +22,17 @@ def _scalar_value(value: float | torch.Tensor) -> float:
 
 def main() -> None:
     # data setup
+    """
+    possible research questions:
+     
+    (1)
+    how the loss landscae changes with different parameters?
+    
+    (2)
+    which discrete estimator is better for the delay length? 
+    (REINFORCE, Gumbel-Softmax, fractional delay relaxation, STE, exhaustive search)
+    (we would need to evaluate correctness of learned parameters on average and compute time/usage)
+    """
 
     seed = 0
     np.random.seed(seed)
