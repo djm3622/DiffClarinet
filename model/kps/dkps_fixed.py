@@ -2,24 +2,32 @@ import torch
 import torchaudio
 from torch import nn
 
+
 class KarplusStrongFixed(nn.Module):
+    """Karplus--Strong synthesizer with a fixed integer delay length."""
 
     def __init__(
         self, delay_len, n_fft=2048, rescale=False, all_plus=True,
-        all_plus_learnable=True, delay_gain_learnable=False, delay_len_learnable=False,
+        all_plus_learnable=True, delay_gain_learnable=False,
         delay_gain=0.99991, a=0.1, random_init=True,
-        delay_len_min=40, delay_len_max=200,
     ):
         super().__init__()
+        if delay_len < 1:
+            raise ValueError("delay_len must be positive.")
         self.n_fft = n_fft
         self.all_plus = all_plus
         self.rescale = rescale
+        self.delay_len = int(delay_len)
 
         self.all_plus_learnable = all_plus_learnable
         self.delay_gain_learnable = delay_gain_learnable
-        self.delay_len_learnable = delay_len_learnable
-        # for frequency sampling
-        self.z = torch.exp(1j * torch.linspace(0, torch.pi, n_fft // 2 + 1))  # vectory of possible frequencies
+        self.register_buffer(
+            "z",
+            torch.exp(
+                1j * torch.linspace(0, torch.pi, n_fft // 2 + 1)
+            ),
+            persistent=False,
+        )
 
         if self.delay_gain_learnable:
             if random_init:
@@ -45,27 +53,6 @@ class KarplusStrongFixed(nn.Module):
         else:
             self.a = a
 
-        if delay_len_learnable:
-            if delay_len_min >= delay_len_max:
-                raise ValueError(
-                    "delay_len_min must be less than delay_len_max when "
-                    "delay_len is learnable."
-                )
-            self.delay_len_min = delay_len_min
-            self.delay_len_max = delay_len_max
-            self.register_buffer(
-                "L_candidates",
-                torch.arange(delay_len_min, delay_len_max + 1),
-            )
-            self.L_logits = nn.Parameter(
-                torch.zeros(
-                    self.L_candidates.numel(),
-                    dtype=torch.get_default_dtype(),
-                )
-            )
-        else:
-            self.delay_len = delay_len
-
     def scaled_gain(self):
         if self.delay_gain_learnable:
             if self.rescale:
@@ -81,47 +68,14 @@ class KarplusStrongFixed(nn.Module):
         return self.a
 
     def scaled_delay_len(self):
-        if self.delay_len_learnable:
-            delay_index = torch.argmax(self.L_logits)
-            return int(self.L_candidates[delay_index].item())
         return int(self.delay_len)
-
-    def delay_len_distribution(self):
-        if not self.delay_len_learnable:
-            raise RuntimeError("delay_len is not configured for inference.")
-        return torch.distributions.Categorical(logits=self.L_logits)
-
-    def sample_delay_lengths(self, num_samples):
-        if num_samples < 1:
-            raise ValueError("num_samples must be at least 1.")
-        distribution = self.delay_len_distribution()
-        delay_indices = distribution.sample((num_samples,))
-        delay_lengths = [
-            int(delay_len.item())
-            for delay_len in self.L_candidates[delay_indices]
-        ]
-        return delay_lengths, distribution.log_prob(delay_indices)
-
-    def delay_len_probabilities(self):
-        return self.delay_len_distribution().probs
-
-    def delay_len_logit_smoothness(self):
-        if not self.delay_len_learnable:
-            raise RuntimeError("delay_len is not configured for inference.")
-        adjacent_differences = self.L_logits[1:] - self.L_logits[:-1]
-        return torch.mean(adjacent_differences.square())
 
     def _resolve_delay_len(self, delay_len):
         if delay_len is None:
             return self.scaled_delay_len()
         delay_len = int(delay_len)
-        if self.delay_len_learnable and not (
-            self.delay_len_min <= delay_len <= self.delay_len_max
-        ):
-            raise ValueError(
-                f"delay_len={delay_len} is outside the candidate range "
-                f"[{self.delay_len_min}, {self.delay_len_max}]."
-            )
+        if delay_len < 1:
+            raise ValueError("delay_len must be positive.")
         return delay_len
     
     # forward pass: synthesis in the frequency domain
@@ -161,30 +115,33 @@ class KarplusStrongFixed(nn.Module):
         exc[:copied_samples] = noise[:copied_samples]
 
         if not self.all_plus:
-            a_coeffs = torch.zeros(delay_len + 2) # poles of delay line
+            a_coeffs = noise.new_zeros(delay_len + 2) # poles of delay line
             a_coeffs[0] = 2
             a_coeffs[delay_len] = -delay_gain
             a_coeffs[delay_len + 1] = -delay_gain
 
-            b_coeffs = torch.zeros(delay_len + 2) # zeros of delay line
+            b_coeffs = noise.new_zeros(delay_len + 2) # zeros of delay line
             b_coeffs[0] = 1
             b_coeffs[1] = 1
         else:
-            a_coeffs = torch.zeros(delay_len + 3) # poles of delay line
+            a_coeffs = noise.new_zeros(delay_len + 3) # poles of delay line
             a_coeffs[0] = 1
             a_coeffs[1] = a
             a_coeffs[delay_len] = - delay_gain*a/2
             a_coeffs[delay_len + 1] = - (delay_gain*(a+1))/2
             a_coeffs[delay_len + 2] = - (delay_gain/2)
 
-            b_coeffs = torch.zeros(delay_len + 3) # zeros of delay line
+            b_coeffs = noise.new_zeros(delay_len + 3) # zeros of delay line
             b_coeffs[0] = a / 2
             b_coeffs[1] = (a + 1) / 2
             b_coeffs[2] = 1/2
 
         # pad or truncate exc to n_samples
         if exc.shape[0] < n_samples:
-            audio = torch.cat([exc, torch.zeros(n_samples - exc.shape[0])])
+            audio = torch.cat([
+                exc,
+                noise.new_zeros(n_samples - exc.shape[0]),
+            ])
         else:
             audio = exc[:n_samples]
 

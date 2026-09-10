@@ -20,6 +20,33 @@ The model/ is where the models live. Also optimizers, losses, any anything else 
 2. The second model, VaryingGain, tries to learn the gain as a function of the input. It again is given L and A, but learns a transformation of input to select the gain, as to learn the gain for many different samples with not the same gain.
 3. The third model, FindL, again tries to learn a single sample. This is given delay gain and A and it wants to learn L. Although there will be a problem with this as L must be an integer but the differentian is continous.
 
+### Delay-length methods
+
+`KarplusStrongFixed` contains the shared physical synthesizer. The delay-length
+estimators in `model/kps/delay_methods.py` extend it with one of four methods:
+
+- `KarplusStrongReinforce`: categorical sampling with REINFORCE.
+- `KarplusStrongGumbelSoftmax`: hard Gumbel--Softmax in the forward pass and a
+  soft gradient in the backward pass. It draws one categorical sample and
+  evaluates one circular response per update.
+- `KarplusStrongExhaustive`: evaluates every candidate and selects the minimum
+  without training.
+- `KarplusStrongPitch`: estimates the period by normalized autocorrelation and
+  corrects for the loop filter's group delay.
+
+Select the method with the `delay_method` value near the top of
+`scripts/train_single_instance.py`. The comparison fixes the known gain and
+all-pass coefficient by default so the result isolates delay selection. Set
+`learn_continuous_parameters = True` with REINFORCE or Gumbel--Softmax to
+recover the earlier joint-fitting setup. Griffin--Lim is not used for the pitch
+baseline because it reconstructs phase from a magnitude spectrogram rather
+than estimating pitch, and the dataset already supplies the target waveform.
+
+The method-specific training functions and dispatcher are in
+`model/kps/training.py`. Set `delay_method = None` to keep `L` fixed and use the
+aligned finite-causal waveform objective. Otherwise, the model subclass selects
+its associated REINFORCE, Gumbel--Softmax, exhaustive, or pitch function.
+
 ## Scripts
 
 The scripts/ are training, inference, and misc.
