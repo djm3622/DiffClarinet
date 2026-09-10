@@ -10,7 +10,7 @@ class KarplusStrongAdaptive(nn.Module):
 
     def __init__(
         self, delay_len, n_fft=2048, rescale=False, all_plus=False, a=0.1, 
-        auraloss_package=True, all_pass_learnable=True, delay_len_learnable=True
+        auraloss_package=True, all_pass_learnable=True, delay_gain_learnable=True
     ):
         super().__init__()
         self.delay_len = delay_len
@@ -20,7 +20,7 @@ class KarplusStrongAdaptive(nn.Module):
         self.a = a
         self.auraloss_package = auraloss_package
         self.all_pass_learnable = all_pass_learnable
-        self.delay_len_learnable = delay_len_learnable
+        self.delay_gain_learnable = delay_gain_learnable
 
         # for frequency sampling
         omega = torch.linspace(0.0, torch.pi, n_fft // 2 + 1)
@@ -30,7 +30,7 @@ class KarplusStrongAdaptive(nn.Module):
         encoder_rank = "l1" # "s1", m1", "l1"
 
         if encoder_type == "base":
-            if delay_len_learnable:
+            if delay_gain_learnable:
                 self.delay_encoder = base_cnn.BaseCNN(encoder_rank)
             else:
                 self.delay_encoder = None
@@ -39,7 +39,7 @@ class KarplusStrongAdaptive(nn.Module):
             else:
                 self.all_pass_encoder = None
         elif encoder_type == "res":
-            if delay_len_learnable:
+            if delay_gain_learnable:
                 self.delay_encoder = res_cnn.ResCNN(encoder_rank)
             else:
                 self.delay_encoder = None
@@ -48,7 +48,7 @@ class KarplusStrongAdaptive(nn.Module):
             else:
                 self.all_pass_encoder = None
         elif encoder_type == "dilated":
-            if delay_len_learnable:
+            if delay_gain_learnable:
                 self.delay_encoder = dilated_cnn.DilatedCNN(encoder_rank)
             else:
                 self.delay_encoder = None
