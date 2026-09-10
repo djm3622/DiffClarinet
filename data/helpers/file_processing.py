@@ -15,7 +15,10 @@ def seperate_out_L(file_name: str) -> int:
 
 
 def seperate_out_delay_gain(file_name: str) -> float:
-    return float(_value_after_label(file_name, 'delay'))
+    value = _value_after_label(file_name, 'delay')
+    if value == 'gain':
+        value = _value_after_label(file_name, 'gain')
+    return float(value)
 
 
 def seperate_out_a(file_name: str) -> float:
