@@ -9,6 +9,7 @@ from .delay_methods import (
     KarplusStrongExhaustive,
     KarplusStrongGumbelSoftmax,
     KarplusStrongPitch,
+    KarplusStrongRelaxation,
     KarplusStrongReinforce,
 )
 from .dkps_fixed import KarplusStrongFixed
@@ -51,7 +52,7 @@ class TrainingResult:
     reconstruction_losses: list[float] = field(default_factory=list)
     gain_trajectory: list[float] = field(default_factory=list)
     allpass_trajectory: list[float] = field(default_factory=list)
-    delay_trajectory: list[int] = field(default_factory=list)
+    delay_trajectory: list[int | float] = field(default_factory=list)
     metadata: dict[str, float | int] = field(default_factory=dict)
 
 
@@ -67,11 +68,18 @@ def _scalar_value(value: float | torch.Tensor) -> float:
     return float(value)
 
 
+def _delay_value(model: KarplusStrongFixed) -> int | float:
+    delay_len = model.scaled_delay_len()
+    if isinstance(delay_len, torch.Tensor):
+        return float(delay_len.detach().item())
+    return int(delay_len)
+
+
 def _new_result(model: KarplusStrongFixed) -> TrainingResult:
     return TrainingResult(
         gain_trajectory=[_scalar_value(model.scaled_gain())],
         allpass_trajectory=[_scalar_value(model.scaled_allplus())],
-        delay_trajectory=[model.scaled_delay_len()],
+        delay_trajectory=[_delay_value(model)],
     )
 
 
@@ -85,7 +93,7 @@ def _record_step(
     )
     result.gain_trajectory.append(_scalar_value(model.scaled_gain()))
     result.allpass_trajectory.append(_scalar_value(model.scaled_allplus()))
-    result.delay_trajectory.append(model.scaled_delay_len())
+    result.delay_trajectory.append(_delay_value(model))
 
 
 def _single_example(dataloader: DataLoader) -> tuple:
@@ -319,6 +327,51 @@ def train_gumbel_softmax(
     return result
 
 
+def train_relaxation(
+    model: KarplusStrongRelaxation,
+    dataloader: DataLoader,
+    config: TrainingConfig,
+) -> TrainingResult:
+    """Train continuous gain and delay through the circular forward model."""
+    result = _new_result(model)
+    parameter_groups = [
+        {
+            "params": [model.delay_len_parameter],
+            "lr": config.continuous_learning_rate,
+        }
+    ]
+    gain_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and name != "delay_len_parameter"
+    ]
+    if gain_parameters:
+        parameter_groups.insert(
+            0,
+            {
+                "params": gain_parameters,
+                "lr": config.continuous_learning_rate,
+            },
+        )
+    optimizer = optim.Adam(parameter_groups)
+    model.train()
+
+    for epoch_index in range(config.epochs):
+        for elements in dataloader:
+            audio = elements[0].squeeze(0)
+            excitation = elements[-1].squeeze(0)
+            target_wave = audio[..., 1:1 + config.n_fft]
+            target = fft.rfft(target_wave, n=config.n_fft).squeeze()
+
+            optimizer.zero_grad()
+            reconstruction_loss = loss_fn(model(excitation), target)
+            reconstruction_loss.backward()
+            optimizer.step()
+            _record_step(result, model, reconstruction_loss)
+            _print_epoch(epoch_index, config, reconstruction_loss)
+    return result
+
+
 def train_exhaustive(
     model: KarplusStrongExhaustive,
     dataloader: DataLoader,
@@ -368,6 +421,8 @@ def training_function_for(model: KarplusStrongFixed) -> TrainFunction:
         return train_exhaustive
     if isinstance(model, KarplusStrongPitch):
         return train_pitch
+    if isinstance(model, KarplusStrongRelaxation):
+        return train_relaxation
     if isinstance(model, KarplusStrongFixed):
         return train_causal
     raise TypeError(f"Unsupported model type: {type(model).__name__}")

@@ -10,6 +10,119 @@ from .dkps_fixed import KarplusStrongFixed
 Objective = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
+class KarplusStrongRelaxation(KarplusStrongFixed):
+    """Karplus--Strong model with a positive continuous delay length.
+
+    Training uses the exact fractional exponent in the circular transfer
+    function. Finite causal synthesis uses the integer part of the learned
+    delay together with an independently learned all-pass coefficient.
+    """
+
+    def __init__(
+        self,
+        delay_len_init: float | None = None,
+        delay_len_init_min: float | None = None,
+        delay_len_init_max: float | None = None,
+        **kwargs,
+    ) -> None:
+        kwargs["all_plus"] = True
+        kwargs["all_plus_learnable"] = True
+        super().__init__(delay_len=1, **kwargs)
+        if delay_len_init is None:
+            if delay_len_init_min is None or delay_len_init_max is None:
+                raise ValueError(
+                    "Random initialization requires delay_len_init_min and "
+                    "delay_len_init_max."
+                )
+            if delay_len_init_min < 1.0:
+                raise ValueError("delay_len_init_min must be at least 1 sample.")
+            if delay_len_init_min >= delay_len_init_max:
+                raise ValueError(
+                    "delay_len_init_min must be less than delay_len_init_max."
+                )
+            initial_delay = torch.empty(
+                (), dtype=torch.get_default_dtype()
+            ).uniform_(
+                float(delay_len_init_min),
+                float(delay_len_init_max),
+            )
+            initial_parameter = initial_delay - 1.0
+        else:
+            if delay_len_init < 1.0:
+                raise ValueError("delay_len_init must be at least 1 sample.")
+            initial_parameter = torch.tensor(
+                float(delay_len_init) - 1.0,
+                dtype=torch.get_default_dtype(),
+            )
+        self.delay_len_parameter = nn.Parameter(initial_parameter)
+
+    def scaled_delay_len(self) -> torch.Tensor:
+        return F.relu(self.delay_len_parameter) + 1.0
+
+    def forward(
+        self,
+        noise: torch.Tensor,
+        delay_len: float | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        noise = noise.flatten()
+        if delay_len is None:
+            continuous_delay = self.scaled_delay_len()
+        else:
+            continuous_delay = torch.as_tensor(
+                delay_len,
+                dtype=self.delay_len_parameter.dtype,
+                device=self.delay_len_parameter.device,
+            )
+
+        integer_delay = int(torch.floor(continuous_delay.detach()).item())
+        if integer_delay < 1:
+            raise ValueError("The continuous delay must be at least 1 sample.")
+        excitation = noise.new_zeros(self.n_fft)
+        copied_samples = min(integer_delay, self.n_fft, noise.numel())
+        excitation[:copied_samples] = noise[:copied_samples]
+        excitation_fft = torch.fft.rfft(excitation)
+
+        z = self.z
+        delay_gain = self.scaled_gain()
+        allpass = self.scaled_allplus()
+        numerator = (
+            0.5 * z.pow(-2)
+            + (allpass + 1.0) / 2.0 * z.pow(-1)
+            + allpass / 2.0
+        )
+        denominator = (
+            -delay_gain / 2.0 * z.pow(-(continuous_delay + 2.0))
+            - delay_gain * (allpass + 1.0) / 2.0
+            * z.pow(-(continuous_delay + 1.0))
+            - delay_gain * allpass / 2.0 * z.pow(-continuous_delay)
+            + allpass * z.pow(-1)
+            + 1.0
+        )
+        return excitation_fft * numerator / denominator
+
+    def time_domain_synth(
+        self,
+        n_samples: int,
+        noise: torch.Tensor,
+        delay_len: float | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Synthesize causally with ``int(L)`` and the learned all-pass."""
+        if delay_len is None:
+            continuous_delay = float(
+                self.scaled_delay_len().detach().item()
+            )
+        else:
+            continuous_delay = float(torch.as_tensor(delay_len).item())
+        integer_delay = int(continuous_delay)
+        if integer_delay < 1:
+            raise ValueError("The continuous delay must be at least 1 sample.")
+        return super().time_domain_synth(
+            n_samples,
+            noise,
+            delay_len=integer_delay,
+        )
+
+
 class _CandidateDelayKarplusStrong(KarplusStrongFixed):
     """Shared candidate-grid behavior for discrete delay estimators."""
 

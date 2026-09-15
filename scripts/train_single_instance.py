@@ -13,6 +13,7 @@ from model.kps.delay_methods import (
     KarplusStrongExhaustive,
     KarplusStrongGumbelSoftmax,
     KarplusStrongPitch,
+    KarplusStrongRelaxation,
     KarplusStrongReinforce,
 )
 from model.kps.objectives.frequency import to_log_mag, loss_fn
@@ -25,6 +26,12 @@ def _scalar_value(value: float | torch.Tensor) -> float:
     if isinstance(value, torch.Tensor):
         return float(value.detach().item())
     return float(value)
+
+
+def _delay_value(value: int | float | torch.Tensor) -> int | float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().item())
+    return value
 
 
 def main() -> None:
@@ -41,8 +48,8 @@ def main() -> None:
     (we would need to evaluate correctness of learned parameters on average and compute time/usage)
     """
 
-    seed = 0
-    delay_method = "gumbel"  # None uses fixed-L causal training.
+    seed = 2
+    delay_method = "relaxation"  # None uses fixed-L causal training.
     learn_continuous_parameters = True
     epochs = 20_000
     gumbel_temperature_start = 1.0
@@ -54,6 +61,7 @@ def main() -> None:
         "gumbel",
         "exhaustive",
         "pitch",
+        "relaxation",
     }:
         raise ValueError(f"Unknown delay method: {delay_method}")
     if (
@@ -80,7 +88,11 @@ def main() -> None:
     train_indx = 6000
     all_plus_learnable = learn_continuous_parameters
     delay_gain_learnable = learn_continuous_parameters
-    delay_len_learnable = delay_method in {"reinforce", "gumbel"}
+    delay_len_learnable = delay_method in {
+        "reinforce",
+        "gumbel",
+        "relaxation",
+    }
 
     train_wav_paths = wav_paths[train_indx:train_indx+1]
     train_mat_paths = mat_paths[train_indx:train_indx+1]
@@ -146,6 +158,12 @@ def main() -> None:
         model = KarplusStrongExhaustive(**candidate_model_kwargs)
     elif fixed and delay_method == "pitch":
         model = KarplusStrongPitch(**candidate_model_kwargs)
+    elif fixed and delay_method == "relaxation":
+        model = KarplusStrongRelaxation(
+            delay_len_init_min=delay_len_min,
+            delay_len_init_max=delay_len_max,
+            **fixed_model_kwargs,
+        )
     elif fixed:
         model = KarplusStrongFixed(delay_len=L, **fixed_model_kwargs)
     else:
@@ -164,7 +182,10 @@ def main() -> None:
         print(f"Initial delay gain: {_scalar_value(model.scaled_gain())}")
     if all_plus_learnable:
         print(f"Initial a: {_scalar_value(model.scaled_allplus())}")
-    if delay_len_learnable:
+    if delay_method == "relaxation":
+        initial_delay_len = _delay_value(model.scaled_delay_len())
+        print(f"Initial continuous L: {initial_delay_len}")
+    elif delay_len_learnable:
         print(
             "Initial delay distribution: uniform over "
             f"[{delay_len_min}, {delay_len_max}]"
@@ -220,7 +241,8 @@ def main() -> None:
             print(f"Learned delay gain: {_scalar_value(model.scaled_gain())}")
         if all_plus_learnable:
             print(f"Learned a: {_scalar_value(model.scaled_allplus())}")
-        print(f"Selected L ({method_name}): {model.scaled_delay_len()}")
+        learned_delay_len = _delay_value(model.scaled_delay_len())
+        print(f"Selected L ({method_name}): {learned_delay_len}")
     else:
         if delay_gain_learnable:
             print(f"Learned delay gain: {model.scaled_gain(test_audio).item()}")
@@ -229,8 +251,35 @@ def main() -> None:
 
     landscape_gains = torch.linspace(0.0, 0.99999, 201)
     landscape_a = torch.linspace(0.0, 1.0, 201)
-    landscape_delay_len = model.scaled_delay_len() if fixed else L
-    if circular:
+    landscape_delay_len = (
+        _delay_value(model.scaled_delay_len()) if fixed else L
+    )
+    if delay_method == "relaxation":
+        trajectory_delay_array = np.asarray(trajectory_delay_lengths)
+        delay_plot_min = max(
+            1.0,
+            min(true_delay_len, float(trajectory_delay_array.min())) - 5.0,
+        )
+        delay_plot_max = (
+            max(true_delay_len, float(trajectory_delay_array.max())) + 5.0
+        )
+        landscape_delay_lengths = torch.linspace(
+            delay_plot_min,
+            delay_plot_max,
+            201,
+        )
+        landscape_losses = (
+            loss_landscape.evaluate_relaxation_loss_landscape(
+                target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
+                excitation=train_dataset[0][-1].squeeze(0),
+                gains=landscape_gains,
+                delay_lengths=landscape_delay_lengths,
+                allpass_value=_scalar_value(model.scaled_allplus()),
+                n_fft=n_fft,
+                batch_size=256,
+            )
+        )
+    elif circular:
         landscape_losses = loss_landscape.evaluate_circular_loss_volume(
             target_waveform=train_dataset[0][0].squeeze(0)[1:1 + n_fft],
             excitation=train_dataset[0][-1].squeeze(0),
@@ -252,19 +301,36 @@ def main() -> None:
     landscape_path = Path(
         f"output/{method_name}_loss_landscape_nfft_{n_fft}.png"
     )
-    loss_landscape.plot_loss_landscape(
-        gains=landscape_gains.numpy(),
-        allpass_values=landscape_a.numpy(),
-        losses=landscape_losses.numpy(),
-        true_gain=true_delay_gain,
-        true_a=true_a,
-        trajectory_gains=np.asarray(trajectory_gains),
-        trajectory_a=np.asarray(trajectory_a),
-        output_path=landscape_path,
-    )
+    if delay_method == "relaxation":
+        loss_landscape.plot_relaxation_loss_landscape(
+            gains=landscape_gains.numpy(),
+            delay_lengths=landscape_delay_lengths.numpy(),
+            losses=landscape_losses.numpy(),
+            true_gain=true_delay_gain,
+            true_delay_length=true_delay_len,
+            trajectory_gains=np.asarray(trajectory_gains),
+            trajectory_delay_lengths=np.asarray(trajectory_delay_lengths),
+            output_path=landscape_path,
+        )
+    else:
+        loss_landscape.plot_loss_landscape(
+            gains=landscape_gains.numpy(),
+            allpass_values=landscape_a.numpy(),
+            losses=landscape_losses.numpy(),
+            true_gain=true_delay_gain,
+            true_a=true_a,
+            trajectory_gains=np.asarray(trajectory_gains),
+            trajectory_a=np.asarray(trajectory_a),
+            output_path=landscape_path,
+        )
     print(f"Saved loss landscape: {landscape_path}")
 
-    if fixed and delay_len_learnable and circular:
+    if (
+        fixed
+        and delay_len_learnable
+        and circular
+        and delay_method != "relaxation"
+    ):
         volume_gains = torch.linspace(0.0, 0.99999, 31)
         volume_a = torch.linspace(0.0, 1.0, 31)
         volume_delay_lengths = torch.arange(

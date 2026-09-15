@@ -1,4 +1,4 @@
-"""Evaluate and plot the single-instance loss over loop gain and all-pass a."""
+"""Evaluate and plot single-instance Karplus--Strong loss landscapes."""
 
 from __future__ import annotations
 
@@ -171,6 +171,89 @@ def evaluate_circular_loss_volume(
             )
 
     return torch.stack(losses_by_delay)
+
+
+def evaluate_relaxation_loss_landscape(
+    target_waveform: torch.Tensor,
+    excitation: torch.Tensor,
+    gains: torch.Tensor,
+    delay_lengths: torch.Tensor,
+    allpass_value: float,
+    n_fft: int,
+    batch_size: int,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Return a continuous ``[L, gain]`` loss slice at one all-pass value."""
+    excitation = excitation.flatten()
+    target_magnitude = torch.fft.rfft(
+        target_waveform,
+        n=n_fft,
+    ).abs()
+    target_log_magnitude = 10.0 * torch.log10(
+        target_magnitude / target_magnitude.max() + eps
+    )
+    z = torch.exp(
+        1j * torch.linspace(
+            0.0,
+            torch.pi,
+            n_fft // 2 + 1,
+            device=excitation.device,
+        )
+    )
+
+    gain_grid, delay_grid = torch.meshgrid(
+        gains,
+        delay_lengths,
+        indexing="xy",
+    )
+    flat_gains = gain_grid.flatten().to(excitation.device)
+    flat_delays = delay_grid.flatten().to(excitation.device)
+    allpass = excitation.new_tensor(allpass_value)
+    padded_excitation = excitation.new_zeros(n_fft)
+    copied_samples = min(n_fft, excitation.numel())
+    padded_excitation[:copied_samples] = excitation[:copied_samples]
+    sample_indices = torch.arange(n_fft, device=excitation.device)
+    losses = []
+
+    with torch.no_grad():
+        for start in range(0, flat_gains.numel(), batch_size):
+            stop = min(start + batch_size, flat_gains.numel())
+            batch_gains = flat_gains[start:stop].unsqueeze(1)
+            batch_delays = flat_delays[start:stop].unsqueeze(1)
+            integer_delays = torch.floor(batch_delays)
+            excitation_batch = padded_excitation.unsqueeze(0) * (
+                sample_indices.unsqueeze(0) < integer_delays
+            )
+            excitation_spectra = torch.fft.rfft(excitation_batch, dim=-1)
+
+            numerator = (
+                0.5 * z.pow(-2)
+                + (allpass + 1.0) / 2.0 * z.pow(-1)
+                + allpass / 2.0
+            )
+            denominator = (
+                -batch_gains / 2.0 * z.pow(-(batch_delays + 2.0))
+                - batch_gains * (allpass + 1.0) / 2.0
+                * z.pow(-(batch_delays + 1.0))
+                - batch_gains * allpass / 2.0 * z.pow(-batch_delays)
+                + allpass * z.pow(-1)
+                + 1.0
+            )
+            prediction_magnitude = (
+                excitation_spectra * numerator / denominator
+            ).abs()
+            prediction_log_magnitude = 10.0 * torch.log10(
+                prediction_magnitude
+                / prediction_magnitude.amax(dim=-1, keepdim=True)
+                + eps
+            )
+            losses.append(
+                (
+                    prediction_log_magnitude - target_log_magnitude
+                ).abs().mean(dim=-1).cpu()
+            )
+
+    return torch.cat(losses).reshape(delay_lengths.numel(), gains.numel())
 
 
 def plot_3d_loss_volume(
@@ -413,6 +496,113 @@ def plot_loss_landscape(
         columnspacing=1.2,
         handletextpad=0.6,
     )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()
+    plt.close(figure)
+
+
+def plot_relaxation_loss_landscape(
+    gains: np.ndarray,
+    delay_lengths: np.ndarray,
+    losses: np.ndarray,
+    true_gain: float,
+    true_delay_length: float,
+    output_path: Path,
+    trajectory_gains: np.ndarray,
+    trajectory_delay_lengths: np.ndarray,
+) -> None:
+    """Plot the continuous-delay optimizer path over the ``[L, gain]`` loss."""
+    if trajectory_gains.shape != trajectory_delay_lengths.shape:
+        raise ValueError("Trajectory gain and L arrays must have matching shapes.")
+    if trajectory_gains.size == 0:
+        raise ValueError("Trajectory arrays cannot be empty.")
+    expected_shape = (delay_lengths.size, gains.size)
+    if losses.shape != expected_shape:
+        raise ValueError(
+            f"Expected loss shape {expected_shape}, but received {losses.shape}."
+        )
+
+    positive_losses = losses[losses > 0.0]
+    color_floor = max(float(positive_losses.min()), np.finfo(np.float32).tiny)
+    log_losses = np.log10(np.maximum(losses, color_floor))
+    minimum_index = np.unravel_index(np.argmin(losses), losses.shape)
+    minimum_gain = gains[minimum_index[1]]
+    minimum_delay = delay_lengths[minimum_index[0]]
+
+    figure, axis = plt.subplots(figsize=(8, 6))
+    image = axis.pcolormesh(
+        gains,
+        delay_lengths,
+        log_losses,
+        shading="auto",
+        cmap="viridis",
+    )
+    colorbar = figure.colorbar(image, ax=axis)
+    colorbar.set_label("log10 objective")
+    axis.scatter(
+        true_gain,
+        true_delay_length,
+        marker="*",
+        s=180,
+        color="white",
+        edgecolor="black",
+        linewidth=0.8,
+        label="True Parameters",
+        zorder=3,
+    )
+    axis.scatter(
+        minimum_gain,
+        minimum_delay,
+        marker="D",
+        s=55,
+        color="red",
+        edgecolor="white",
+        linewidth=0.8,
+        label="Grid Minimum",
+        zorder=3,
+    )
+    axis.plot(
+        trajectory_gains,
+        trajectory_delay_lengths,
+        color="white",
+        linewidth=2.5,
+        alpha=0.9,
+        zorder=2,
+    )
+    axis.plot(
+        trajectory_gains,
+        trajectory_delay_lengths,
+        color="black",
+        linewidth=0.8,
+        alpha=0.9,
+        label="Optimization Path",
+        zorder=2,
+    )
+    axis.scatter(
+        trajectory_gains[0],
+        trajectory_delay_lengths[0],
+        marker="o",
+        s=55,
+        color="white",
+        edgecolor="black",
+        label="Initial Parameters",
+        zorder=4,
+    )
+    axis.scatter(
+        trajectory_gains[-1],
+        trajectory_delay_lengths[-1],
+        marker="o",
+        s=55,
+        color="orange",
+        edgecolor="black",
+        label="Final Parameters",
+        zorder=4,
+    )
+    axis.set_xlabel("$k$")
+    axis.set_ylabel("$L$")
+    axis.legend(loc="best", frameon=False)
+    figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
