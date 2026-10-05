@@ -1,3 +1,6 @@
+import argparse
+import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -5,10 +8,11 @@ import torch
 from torch import fft
 from torch.utils.data import DataLoader
 
-from data.dataset import MatlabData
+from data.dataset import MatlabData, MatlabPluckData
 from data.helpers import file_processing
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
+from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from model.kps.delay_methods import (
     KarplusStrongExhaustive,
     KarplusStrongGumbelSoftmax,
@@ -17,7 +21,16 @@ from model.kps.delay_methods import (
     KarplusStrongReinforce,
 )
 from model.kps.objectives.frequency import to_log_mag, loss_fn
-from model.kps.training import TrainingConfig, train_model
+from model.kps.training import (
+    TrainingConfig,
+    train_model,
+    train_pluck_exhaustive,
+    train_pluck_gumbel,
+    train_pluck_pitch,
+    train_pluck_reinforce,
+    train_pluck_relaxation,
+    refine_pluck_continuous,
+)
 
 from .eval import listening, loss_landscape, plots
 
@@ -34,6 +47,203 @@ def _delay_value(value: int | float | torch.Tensor) -> int | float:
     return value
 
 
+def _train_pluck_instance(
+    seed: int,
+    delay_method: str | None,
+    train_index: int,
+    epochs: int,
+    n_fft: int,
+    refine_epochs: int,
+) -> None:
+    """Fit integer L and dp using a raw one-sample unit impulse."""
+    if delay_method not in {
+        None, "reinforce", "gumbel", "exhaustive", "pitch", "relaxation"
+    }:
+        raise ValueError(f"Unknown pluck delay method: {delay_method}")
+    method_name = delay_method or "causal"
+    directory = "data/vary_all_pluck/"
+    wav_paths = file_processing.sort_file_path_list(
+        file_processing.get_files_in_dir_wav(directory)
+    )
+    mat_paths = file_processing.sort_file_path_list(
+        file_processing.get_files_in_dir_mat(directory)
+    )
+    if not 0 <= train_index < len(wav_paths):
+        raise IndexError(
+            f"train_index={train_index} is outside {len(wav_paths)} WAV files."
+        )
+    dataset = MatlabPluckData(
+        wav_paths[train_index:train_index + 1],
+        mat_paths[train_index:train_index + 1],
+    )
+    true_gain = float(dataset.audios[0][2])
+    true_a = float(dataset.audios[0][3])
+    true_L = int(dataset.audios[0][4])
+    true_dp = int(dataset.audios[0][5])
+    target_waveform = dataset.audios[0][0].squeeze(0)
+    sample_rate = int(dataset.audios[0][1])
+    unit_impulse = dataset.excs[0]
+    print(f"Training sample: {Path(wav_paths[train_index]).name}")
+    print(f"Input impulse: {unit_impulse.tolist()}")
+    print(
+        f"True K={true_gain}, a={true_a}, L={true_L}, dp={true_dp}"
+    )
+
+    learn_continuous = True
+    model_kwargs = dict(
+        delay_len_min=100,
+        delay_len_max=200,
+        dp_min=1,
+        dp_max=100,
+        n_fft=n_fft,
+        all_plus=True,
+        all_plus_learnable=learn_continuous,
+        delay_gain_learnable=learn_continuous,
+        delay_gain=0.9,
+        a=0.5,
+        random_init=False,
+    )
+    if delay_method == "relaxation":
+        model = KarplusStrongPluckRelaxation(
+            delay_len_init=150.5, **model_kwargs
+        )
+    else:
+        model = KarplusStrongPluck(**model_kwargs)
+    if delay_method is None:
+        model.fix_L(true_L)
+    print(f"Method: {method_name}")
+    if delay_method is None:
+        print("L is fixed to the filename label in the causal baseline.")
+    print(
+        f"Initial K={_scalar_value(model.scaled_gain()):.6f}, "
+        f"a={_scalar_value(model.scaled_allplus()):.6f}, "
+        f"L={_delay_value(model.scaled_delay_len())}, "
+        f"dp={model.scaled_dp()}"
+    )
+    n_samples = target_waveform.numel() - 1
+    model.eval()
+    initial_waveform = model.time_domain_synth(
+        n_samples, unit_impulse
+    ).detach()
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        generator=torch.Generator().manual_seed(seed),
+    )
+    training_config = TrainingConfig(epochs=epochs, n_fft=n_fft)
+    training_start = time.perf_counter()
+    if delay_method in {None, "reinforce"}:
+        result = train_pluck_reinforce(model, dataloader, training_config)
+    elif delay_method == "gumbel":
+        result = train_pluck_gumbel(model, dataloader, training_config)
+    elif delay_method == "relaxation":
+        result = train_pluck_relaxation(model, dataloader, training_config)
+    elif delay_method == "exhaustive":
+        search_result = train_pluck_exhaustive(
+            model, dataloader, training_config
+        )
+        print(
+            f"Exhaustive selected L={model.scaled_delay_len()}, "
+            f"dp={model.scaled_dp()} before continuous refinement"
+        )
+        result = refine_pluck_continuous(
+            model,
+            dataloader,
+            TrainingConfig(epochs=refine_epochs, n_fft=n_fft),
+        )
+        result.metadata.update(search_result.metadata)
+    else:
+        search_result = train_pluck_pitch(model, dataloader, training_config)
+        print(
+            f"Pitch baseline selected L={model.scaled_delay_len()}, "
+            f"dp={model.scaled_dp()} before continuous refinement"
+        )
+        result = refine_pluck_continuous(
+            model,
+            dataloader,
+            TrainingConfig(epochs=refine_epochs, n_fft=n_fft),
+        )
+        result.metadata.update(search_result.metadata)
+    training_wall_seconds = time.perf_counter() - training_start
+    model.eval()
+    selected_waveform = model.time_domain_synth(
+        n_samples, unit_impulse
+    ).detach()
+    target = target_waveform[1:]
+    rmse = torch.sqrt(torch.mean((selected_waveform - target).square()))
+    spectral_loss = loss_fn(
+        fft.rfft(selected_waveform), fft.rfft(target)
+    )
+    print(
+        f"Selected K={_scalar_value(model.scaled_gain()):.6f}, "
+        f"a={_scalar_value(model.scaled_allplus()):.6f}, "
+        f"L={_delay_value(model.scaled_delay_len())}, "
+        f"dp={model.scaled_dp()}"
+    )
+    print(f"Finite-causal RMSE: {float(rmse):.6f}")
+    print(f"Finite-causal spectral loss: {float(spectral_loss):.6f}")
+    print(f"Recorded {len(result.reconstruction_losses)} training steps")
+    print(f"Training/search wall time: {training_wall_seconds:.1f} s")
+
+    for name, value in result.metadata.items():
+        print(f"{name}: {value}")
+
+    output_dir = Path(
+        f"output/pluck_single_instance/{train_index:05d}/{method_name}"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_L = _delay_value(model.scaled_delay_len())
+    summary = {
+        "method": method_name,
+        "seed": seed,
+        "sample": Path(wav_paths[train_index]).name,
+        "n_fft": training_config.n_fft,
+        "epochs": len(result.reconstruction_losses),
+        "training_wall_seconds": training_wall_seconds,
+        "true": {
+            "K": true_gain,
+            "a": true_a,
+            "L": true_L,
+            "dp": true_dp,
+        },
+        "selected": {
+            "K": _scalar_value(model.scaled_gain()),
+            "a": _scalar_value(model.scaled_allplus()),
+            "L": selected_L,
+            "causal_L": int(selected_L),
+            "dp": model.scaled_dp(),
+        },
+        "causal_rmse": float(rmse),
+        "causal_spectral_loss": float(spectral_loss),
+        "metadata": result.metadata,
+    }
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    np.savez_compressed(
+        output_dir / "trajectory.npz",
+        loss=np.asarray(result.reconstruction_losses),
+        K=np.asarray(result.gain_trajectory),
+        a=np.asarray(result.allpass_trajectory),
+        L=np.asarray(result.delay_trajectory),
+        dp=np.asarray(result.dp_trajectory),
+    )
+    listening.save_audio(str(output_dir / "target.wav"), target_waveform, sample_rate)
+    listening.save_audio(
+        str(output_dir / "initial_synthesis.wav"),
+        initial_waveform,
+        sample_rate,
+    )
+    listening.save_audio(
+        str(output_dir / "selected_synthesis.wav"),
+        selected_waveform,
+        sample_rate,
+    )
+
+
 def main() -> None:
     # data setup
     """
@@ -48,8 +258,40 @@ def main() -> None:
     (we would need to evaluate correctness of learned parameters on average and compute time/usage)
     """
 
-    seed = 2
-    delay_method = "relaxation"  # None uses fixed-L causal training.
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data-mode", choices=("pluck", "legacy"), default="pluck"
+    )
+    parser.add_argument(
+        "--method",
+        choices=(
+            "reinforce", "gumbel", "relaxation", "exhaustive", "pitch",
+            "causal",
+        ),
+        default="reinforce",
+    )
+    parser.add_argument("--train-index", type=int, default=6000)
+    parser.add_argument("--epochs", type=int, default=20_000)
+    parser.add_argument("--refine-epochs", type=int, default=2_000)
+    parser.add_argument("--n-fft", type=int, default=8192)
+    parser.add_argument("--seed", type=int, default=2)
+    args = parser.parse_args()
+    seed = args.seed
+    data_mode = args.data_mode
+    delay_method = None if args.method == "causal" else args.method
+    if data_mode == "pluck":
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        _train_pluck_instance(
+            seed,
+            delay_method,
+            args.train_index,
+            args.epochs,
+            args.n_fft,
+            args.refine_epochs,
+        )
+        return
+
     learn_continuous_parameters = True
     epochs = 20_000
     gumbel_temperature_start = 1.0
