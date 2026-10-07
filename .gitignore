@@ -5,6 +5,7 @@ testing.ipynb
 
 output/
 tests/
+data/vary_all_triangle/manifest.json
 handoff*.md
 data/matlab_triangle/
 
