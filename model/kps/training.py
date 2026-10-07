@@ -905,6 +905,13 @@ def _triangle_spectrum(models: nn.ModuleList,
     ]).sum(0)
 
 
+def _folded_target_spectrum(target: torch.Tensor, n_fft: int) -> torch.Tensor:
+    """Evaluate the full observed response on the circular model's FFT grid."""
+    pad = (-target.numel()) % n_fft
+    folded = F.pad(target, (0, pad)).reshape(-1, n_fft).sum(0)
+    return torch.fft.rfft(folded)
+
+
 def _triangle_regularization(models: nn.ModuleList, prior_weight: float,
                              smoothness_weight: float,
                              position: str = "A") -> torch.Tensor:
@@ -970,7 +977,8 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
     if indices is not None and len(indices) != len(models):
         raise ValueError("Each source must have one display index.")
 
-    target_spectrum = torch.fft.rfft(target[:config.n_fft])
+    circular_target_spectrum = _folded_target_spectrum(target, config.n_fft)
+    causal_target_spectrum = torch.fft.rfft(target[:config.n_fft])
     second_name = "A_logits" if position == "A" else "dp_logits"
     discrete = [parameter for model in models for parameter in
                 (model.L_logits, getattr(model, second_name))]
@@ -991,7 +999,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         losses = torch.stack([
             _triangle_spectral_loss(
                 _triangle_spectrum(models, [source[0][i] for source in samples]),
-                target_spectrum, config.spectrum_normalization)
+                circular_target_spectrum, config.spectrum_normalization)
             for i in range(config.reinforce_samples)
         ])
         detached = losses.detach()
@@ -1035,7 +1043,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         for epoch_index in phase_two:
             optimizer.zero_grad()
             measured = _loss(_synth(models, config.n_fft, result.pairs),
-                             target_spectrum, config.spectrum_normalization)
+                             causal_target_spectrum, config.spectrum_normalization)
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()

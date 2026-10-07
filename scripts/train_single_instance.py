@@ -245,6 +245,8 @@ def _train_pluck_instance(
         if delay_method == "reinforce" else "peak",
         "reinforce_fit_domain": "circular_transfer_function"
         if delay_method == "reinforce" else None,
+        "phase1_target": "full_waveform_folded_to_fft_grid"
+        if delay_method == "reinforce" else None,
         "refinement_domain": "finite_causal"
         if delay_method == "reinforce" else None,
         "excitation_filter": "two_tap_comb",
@@ -400,6 +402,8 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         "total_training_steps": len(result.losses),
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function"
+        if args.method == "reinforce" else None,
+        "phase1_target": "full_waveform_folded_to_fft_grid"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",

@@ -255,6 +255,8 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
+        "phase1_target": "full_waveform_folded_to_fft_grid"
+        if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
         "initialization": "seeded_random_L_A_K_a"
@@ -482,6 +484,7 @@ def main() -> None:
         "refine_epochs": continuous_epochs,
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function",
+        "phase1_target": "full_waveform_folded_to_fft_grid",
         "refinement_domain": "finite_causal",
         "excitation_filter": "two_tap_comb",
         "initialization": "seeded_random_L_dp_K_a",
