@@ -276,8 +276,6 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                         pairs=np.asarray(result.trajectory),
                         K=np.asarray(result.gain_trajectory),
                         a=np.asarray(result.allpass_trajectory))
-    print(json.dumps({"output": str(output), "selected_pairs": result.pairs,
-                      "causal_metrics": metrics, "matched_sources": matches}, indent=2))
 
 
 def main() -> None:

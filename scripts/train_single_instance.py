@@ -426,9 +426,6 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
                         ("selected_synthesis", prediction)):
         wavfile.write(output / f"{name}.wav", sample_rate,
                       audio.cpu().numpy().astype(np.float32))
-    print(json.dumps({"output": str(output), "selected": estimate,
-                      "true": truth, "causal_rmse": rmse,
-                      "causal_spectral_loss": spectral_loss}, indent=2))
 
 
 def main() -> None:
