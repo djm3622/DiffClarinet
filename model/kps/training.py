@@ -846,6 +846,10 @@ class TriangleFitConfig:
     reinforce_samples: int = 4
     continuous_lr: float = 1e-2
     discrete_lr: float = 3e-3
+    initial_uniform_prior_weight: float = 5e-2
+    final_uniform_prior_weight: float = 1e-3
+    ordinal_smoothness_weight: float = 1e-4
+    advantage_clip: float = 5.0
     gumbel_temperature: float = 1.0
     exhaustive_cap: int = 10000
     show_progress: bool = False
@@ -859,6 +863,11 @@ class TriangleFitConfig:
             raise ValueError("Leave-one-out baseline needs at least two samples.")
         if self.gumbel_temperature <= 0 or self.exhaustive_cap < 1:
             raise ValueError("Invalid temperature or enumeration cap.")
+        if (self.initial_uniform_prior_weight < 0
+                or self.final_uniform_prior_weight < 0
+                or self.ordinal_smoothness_weight < 0
+                or self.advantage_clip <= 0):
+            raise ValueError("REINFORCE regularization must be nonnegative and clipping positive.")
 
 
 @dataclass
@@ -885,6 +894,22 @@ def _triangle_spectrum(models: nn.ModuleList,
         model.spectral_response(model.L_logits.new_ones(1), *pair)
         for model, pair in zip(models, pairs)
     ]).sum(0)
+
+
+def _triangle_regularization(models: nn.ModuleList, prior_weight: float,
+                             smoothness_weight: float) -> torch.Tensor:
+    """Mean valid-pair KL and ordinal logit penalty across sources."""
+    penalties = []
+    for model in models:
+        probabilities = model.pair_distribution().probs
+        positive = probabilities > 0
+        log_uniform = -torch.log(
+            probabilities.new_tensor(float(model.valid_pair_count())))
+        prior_kl = torch.sum(probabilities[positive] * (
+            torch.log(probabilities[positive]) - log_uniform))
+        penalties.append(prior_weight * prior_kl
+                         + smoothness_weight * model.logits_smoothness())
+    return torch.stack(penalties).mean()
 
 
 def _record_triangle_step(result: TriangleFitResult,
@@ -1019,7 +1044,19 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                 advantage = (detached - baseline) / (detached - baseline).std(
                     unbiased=False).clamp_min(1e-6)
                 log_probs = torch.stack([source[1] for source in samples]).sum(0)
-                objective = losses.mean() + (advantage.clamp(-5, 5) * log_probs).mean()
+                progress = epoch_index / max(config.epochs - 1, 1)
+                prior_weight = (
+                    config.initial_uniform_prior_weight
+                    + progress * (config.final_uniform_prior_weight
+                                  - config.initial_uniform_prior_weight)
+                )
+                objective = (
+                    losses.mean()
+                    + (advantage.clamp(-config.advantage_clip,
+                                       config.advantage_clip) * log_probs).mean()
+                    + _triangle_regularization(
+                        models, prior_weight, config.ordinal_smoothness_weight)
+                )
                 measured = losses.mean()
             elif method == "gumbel":
                 causal_parts, surrogate_parts = [], []

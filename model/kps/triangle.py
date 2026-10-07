@@ -76,6 +76,13 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         indices = distribution.sample((count,))
         return [self._decode(int(i)) for i in indices], distribution.log_prob(indices)
 
+    def logits_smoothness(self) -> torch.Tensor:
+        penalty = self.L_logits.new_zeros(())
+        for logits in (self.L_logits, self.A_logits):
+            if logits.numel() > 1:
+                penalty = penalty + logits.diff().square().mean()
+        return penalty
+
     def select_pair(self, pair: tuple[int, int]) -> None:
         if pair not in self.all_pairs():
             raise ValueError("Pair is outside the valid candidate grid.")
@@ -91,7 +98,7 @@ class KarplusStrongTriangle(KarplusStrongFixed):
                    K: torch.Tensor | float | None = None) -> torch.Tensor:
         source = self._unit(unit_impulse)
         gain = self.scaled_gain() if K is None else K
-        return -gain * triangle(n_samples, L, A, source)
+        return -gain * source[0] * triangle(n_samples, L, A, source)
 
     def spectral_response(self, unit_impulse: torch.Tensor,
                           L: int | torch.Tensor, A: int | torch.Tensor,

@@ -169,6 +169,13 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         method=args.method, epochs=args.epochs,
         refine_epochs=args.refine_epochs, n_fft=args.n_fft,
         reinforce_samples=args.reinforce_samples,
+        initial_uniform_prior_weight=getattr(
+            args, "initial_uniform_prior_weight", 5e-2),
+        final_uniform_prior_weight=getattr(
+            args, "final_uniform_prior_weight", 1e-3),
+        ordinal_smoothness_weight=getattr(
+            args, "ordinal_smoothness_weight", 1e-4),
+        advantage_clip=getattr(args, "advantage_clip", 5.0),
         exhaustive_cap=args.exhaustive_cap,
         show_progress=getattr(args, "show_progress", True),
     )
@@ -223,6 +230,12 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
+        "reinforce_stability": {
+            "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
+            "final_uniform_prior_weight": config.final_uniform_prior_weight,
+            "ordinal_smoothness_weight": config.ordinal_smoothness_weight,
+            "advantage_clip": config.advantage_clip,
+        } if args.method == "reinforce" else None,
         "selected_pairs": result.pairs,
         "search_evaluations": result.search_evaluations,
         "estimated_periods": result.estimated_periods,
@@ -262,6 +275,10 @@ def main() -> None:
     parser.add_argument("--initial-a", type=float, default=0.5)
     parser.add_argument("--initial-L", type=float, default=150.5)
     parser.add_argument("--reinforce-samples", type=int, default=8)
+    parser.add_argument("--initial-uniform-prior-weight", type=float, default=5e-2)
+    parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
+    parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
+    parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")
