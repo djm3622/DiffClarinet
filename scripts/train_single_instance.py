@@ -317,6 +317,9 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "reinforce_fit_domain": "circular_transfer_function"
+        if args.method == "reinforce" else None,
+        "refinement_domain": "finite_causal",
         "search_evaluations": result.search_evaluations,
         "estimated_periods": result.estimated_periods,
         "training_wall_seconds": wall_seconds,
@@ -327,7 +330,9 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     np.savez_compressed(output / "trajectory.npz",
                         loss=np.asarray(result.losses),
-                        pairs=np.asarray(result.trajectory))
+                        pairs=np.asarray(result.trajectory),
+                        K=np.asarray(result.gain_trajectory),
+                        a=np.asarray(result.allpass_trajectory))
     for name, audio in (("target", target), ("initial_synthesis", initial),
                         ("selected_synthesis", prediction)):
         wavfile.write(output / f"{name}.wav", sample_rate,

@@ -866,6 +866,8 @@ class TriangleFitResult:
     pairs: list[tuple[int, int]]
     losses: list[float] = field(default_factory=list)
     trajectory: list[list[tuple[int, int]]] = field(default_factory=list)
+    gain_trajectory: list[list[float]] = field(default_factory=list)
+    allpass_trajectory: list[list[float]] = field(default_factory=list)
     search_evaluations: int = 0
     estimated_periods: list[int] = field(default_factory=list)
 
@@ -874,6 +876,28 @@ def _synth(models: nn.ModuleList, n: int,
            pairs: list[tuple[int, int]]) -> torch.Tensor:
     return torch.stack([model.time_domain_synth(n, model.L_logits.new_ones(1), *pair)
                         for model, pair in zip(models, pairs)]).sum(0)
+
+
+def _triangle_spectrum(models: nn.ModuleList,
+                       pairs: list[tuple[int, int]]) -> torch.Tensor:
+    """Sum circular transfer-function predictions for sampled integer pairs."""
+    return torch.stack([
+        model.spectral_response(model.L_logits.new_ones(1), *pair)
+        for model, pair in zip(models, pairs)
+    ]).sum(0)
+
+
+def _record_triangle_step(result: TriangleFitResult,
+                          models: nn.ModuleList, loss: torch.Tensor,
+                          pairs: list[tuple[int, int]]) -> None:
+    result.losses.append(float(loss.detach()))
+    result.trajectory.append(list(pairs))
+    result.gain_trajectory.append([
+        float(model.scaled_gain().detach()) for model in models
+    ])
+    result.allpass_trajectory.append([
+        float(model.scaled_allplus().detach()) for model in models
+    ])
 
 
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor) -> torch.Tensor:
@@ -935,7 +959,7 @@ def _continuous_parameters(models: nn.ModuleList) -> list[nn.Parameter]:
 
 def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                  config: TriangleFitConfig) -> TriangleFitResult:
-    """Fit all sources to the summed target; isolated stems are never arguments."""
+    """Fit from the mixture; REINFORCE uses circular spectra, refinement causal."""
     if not models or target.ndim != 1 or target.numel() < config.n_fft:
         raise ValueError("Expected nonempty models and a one-dimensional long target.")
     if any(model.n_fft != config.n_fft for model in models):
@@ -986,8 +1010,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
             if method == "reinforce":
                 samples = [model.sample_pairs(config.reinforce_samples) for model in models]
                 losses = torch.stack([
-                    _loss(_synth(models, config.n_fft,
-                                 [source[0][i] for source in samples]), target_spectrum)
+                    loss_fn(_triangle_spectrum(
+                        models, [source[0][i] for source in samples]),
+                        target_spectrum)
                     for i in range(config.reinforce_samples)])
                 detached = losses.detach()
                 baseline = (detached.sum() - detached) / (config.reinforce_samples - 1)
@@ -1064,8 +1089,8 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                     for model in models:
                         model.delay_len_parameter.clamp_(
                             float(model.L_candidates[0]), float(model.L_candidates[-1]))
-            result.losses.append(float(measured.detach()))
-            result.trajectory.append([model.selected_delays() for model in models])
+            _record_triangle_step(result, models, measured,
+                                  [model.selected_delays() for model in models])
             if config.show_progress and (
                 epoch_index == 0 or (epoch_index + 1) % 100 == 0
             ):
@@ -1089,8 +1114,7 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
             optimizer.step()
-            result.losses.append(float(measured.detach()))
-            result.trajectory.append(list(pairs))
+            _record_triangle_step(result, models, measured, pairs)
             if config.show_progress and (
                 epoch_index == 0 or (epoch_index + 1) % 100 == 0
             ):

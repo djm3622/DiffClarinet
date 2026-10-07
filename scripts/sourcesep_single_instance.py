@@ -220,6 +220,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "reinforce_fit_domain": "circular_transfer_function"
+        if args.method == "reinforce" else None,
+        "refinement_domain": "finite_causal",
         "selected_pairs": result.pairs,
         "search_evaluations": result.search_evaluations,
         "estimated_periods": result.estimated_periods,
@@ -229,7 +232,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
     (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     np.savez_compressed(output / "trajectory.npz",
                         loss=np.asarray(result.losses),
-                        pairs=np.asarray(result.trajectory))
+                        pairs=np.asarray(result.trajectory),
+                        K=np.asarray(result.gain_trajectory),
+                        a=np.asarray(result.allpass_trajectory))
     print(json.dumps({"output": str(output), "selected_pairs": result.pairs,
                       "causal_metrics": metrics, "matched_sources": matches}, indent=2))
 
