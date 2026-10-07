@@ -8,6 +8,7 @@ from torch import fft, optim
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import trange
 
 from .delay_methods import (
     KarplusStrongExhaustive,
@@ -847,6 +848,7 @@ class TriangleFitConfig:
     discrete_lr: float = 3e-3
     gumbel_temperature: float = 1.0
     exhaustive_cap: int = 10000
+    show_progress: bool = False
 
     def __post_init__(self) -> None:
         if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
@@ -977,7 +979,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
         if continuous:
             groups.append({"params": continuous, "lr": config.continuous_lr})
         optimizer = torch.optim.Adam(groups)
-        for _ in range(config.epochs):
+        phase_one = trange(config.epochs, desc="Triangle fit",
+                           disable=not config.show_progress)
+        for epoch_index in phase_one:
             optimizer.zero_grad()
             if method == "reinforce":
                 samples = [model.sample_pairs(config.reinforce_samples) for model in models]
@@ -1062,6 +1066,13 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                             float(model.L_candidates[0]), float(model.L_candidates[-1]))
             result.losses.append(float(measured.detach()))
             result.trajectory.append([model.selected_delays() for model in models])
+            if config.show_progress and (
+                epoch_index == 0 or (epoch_index + 1) % 100 == 0
+            ):
+                phase_one.set_postfix(
+                    loss=f"{result.losses[-1]:.4f}",
+                    pairs=str(result.trajectory[-1]),
+                )
         pairs = [model.selected_delays() for model in models]
 
     # Phase 2: optimize only K and a using finite-causal mixture audio.
@@ -1069,7 +1080,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
     continuous = _continuous_parameters(models)
     if continuous and config.refine_epochs:
         optimizer = torch.optim.Adam(continuous, lr=config.continuous_lr)
-        for _ in range(config.refine_epochs):
+        phase_two = trange(config.refine_epochs, desc="Triangle causal refine",
+                           disable=not config.show_progress)
+        for epoch_index in phase_two:
             optimizer.zero_grad()
             measured = _loss(_synth(models, config.n_fft, pairs), target_spectrum)
             if not torch.isfinite(measured):
@@ -1078,4 +1091,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
             optimizer.step()
             result.losses.append(float(measured.detach()))
             result.trajectory.append(list(pairs))
+            if config.show_progress and (
+                epoch_index == 0 or (epoch_index + 1) % 100 == 0
+            ):
+                phase_two.set_postfix(loss=f"{result.losses[-1]:.4f}",
+                                      pairs=str(pairs))
     return result

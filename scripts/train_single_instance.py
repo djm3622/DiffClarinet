@@ -254,6 +254,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
     if args.method == "causal":
         raise ValueError("Triangle causal refinement requires an audio-derived pair.")
     directory = Path(args.dataset_dir or "data/vary_all_triangle")
+    print(f"Loading triangle sample {args.train_index} from {directory}", flush=True)
     manifest = json.loads((directory / "manifest.json").read_text())
     wav_paths = sorted(directory.glob("*.wav"))
     if not 0 <= args.train_index < len(wav_paths):
@@ -275,6 +276,12 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
             delay_len_init=args.initial_L, **model_kwargs)
     else:
         model = KarplusStrongTriangle(**model_kwargs)
+    print(
+        f"Loaded {wav_path.name}: {target.numel()} causal samples, "
+        f"{model.valid_pair_count()} valid (L, A) pairs; "
+        f"{args.epochs} fit + {args.refine_epochs} refinement epochs",
+        flush=True,
+    )
     with torch.no_grad():
         initial = model.time_domain_synth(target.numel(), impulse).detach()
     config = TriangleFitConfig(
@@ -282,6 +289,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         refine_epochs=args.refine_epochs, n_fft=args.n_fft,
         reinforce_samples=args.reinforce_samples,
         exhaustive_cap=args.exhaustive_cap,
+        show_progress=getattr(args, "show_progress", True),
     )
     start = time.perf_counter()
     result = fit_triangle(nn.ModuleList([model]), target, config)
@@ -371,6 +379,8 @@ def main() -> None:
     parser.add_argument("--initial-L", type=float, default=150.5)
     parser.add_argument("--reinforce-samples", type=int, default=4)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
+    parser.add_argument("--no-progress", dest="show_progress",
+                        action="store_false")
     args = parser.parse_args()
     seed = args.seed
     data_mode = args.data_mode

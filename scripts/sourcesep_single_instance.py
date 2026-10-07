@@ -130,6 +130,8 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
     if args.method == "causal":
         raise ValueError("Triangle causal refinement requires audio-derived pairs.")
     directory = Path(args.dataset_dir or "data/vary_all_triangle")
+    print(f"Loading {len(args.indices)} triangle sources from {directory}",
+          flush=True)
     manifest = json.loads((directory / "manifest.json").read_text())
     wav_paths = sorted(directory.glob("*.wav"))
     indices = args.indices
@@ -157,11 +159,18 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
     else:
         model_type = KarplusStrongTriangle
     sources = nn.ModuleList(model_type(**kwargs) for _ in indices)
+    print(
+        f"Loaded {len(indices)} sources, {target.numel()} causal samples each, "
+        f"{sources[0].valid_pair_count()} valid pairs per source; "
+        f"{args.epochs} fit + {args.refine_epochs} refinement epochs",
+        flush=True,
+    )
     config = TriangleFitConfig(
         method=args.method, epochs=args.epochs,
         refine_epochs=args.refine_epochs, n_fft=args.n_fft,
         reinforce_samples=args.reinforce_samples,
         exhaustive_cap=args.exhaustive_cap,
+        show_progress=getattr(args, "show_progress", True),
     )
     result = fit_triangle(sources, target, config)
     with torch.no_grad():
@@ -249,6 +258,8 @@ def main() -> None:
     parser.add_argument("--initial-L", type=float, default=150.5)
     parser.add_argument("--reinforce-samples", type=int, default=8)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
+    parser.add_argument("--no-progress", dest="show_progress",
+                        action="store_false")
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
