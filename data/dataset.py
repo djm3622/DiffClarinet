@@ -77,3 +77,43 @@ class MatlabPluckData(Dataset):
 
     def __getitem__(self, idx: int) -> tuple:
         return self.audios[idx] + (self.excs[idx],)
+
+
+class MatlabTriangleData(Dataset):
+    """Validated causal targets; labels and MATLAB excitation stay outside batches."""
+
+    def __init__(self, wav_paths: list[str], manifest: dict) -> None:
+        from pathlib import Path
+
+        required = {"sample_rate", "causal_samples", "leading_zero", "sign", "audio_format"}
+        if not required.issubset(manifest):
+            raise ValueError(f"Manifest lacks {sorted(required - manifest.keys())}.")
+        if manifest["leading_zero"] != 1 or manifest["sign"] != "negative":
+            raise ValueError("Expected one leading zero and negative excitation sign.")
+        if manifest["audio_format"] not in {"24-bit PCM WAV", "float32 WAV"}:
+            raise ValueError("Unsupported triangle target audio format.")
+        self.examples: list[tuple[torch.Tensor, int, torch.Tensor]] = []
+        for wav_path in wav_paths:
+            mat_path = str(Path(wav_path).with_suffix(".mat"))
+            metadata = loadmat(mat_path, variable_names=["impulse_gain", "scale"])
+            if float(metadata["impulse_gain"].item()) != 1.0:
+                raise ValueError(f"Nonunit impulse gain: {mat_path}")
+            if float(metadata["scale"].item()) != 1.0:
+                raise ValueError(f"Scaled triangle target: {mat_path}")
+            waveform, sample_rate = preprocessing.load_target_waveforms(wav_path)
+            if waveform.shape[0] != 1 or sample_rate != int(manifest["sample_rate"]):
+                raise ValueError(f"Wrong channel count or sample rate: {wav_path}")
+            if waveform.shape[-1] != int(manifest["causal_samples"]) + 1:
+                raise ValueError(f"Wrong target sample count: {wav_path}")
+            if waveform[0, 0].abs() > 1e-6:
+                raise ValueError(f"Missing leading zero: {wav_path}")
+            if not torch.isfinite(waveform).all() or waveform.abs().max() >= 0.99999:
+                raise ValueError(f"Nonfinite or potentially clipped target: {wav_path}")
+            self.examples.append((waveform[0, 1:].contiguous(), sample_rate,
+                                  torch.ones(1, dtype=waveform.dtype)))
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, torch.Tensor]:
+        return self.examples[idx]

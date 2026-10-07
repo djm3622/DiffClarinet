@@ -424,7 +424,7 @@ def train_pluck_pitch(
     dataloader: DataLoader,
     config: TrainingConfig,
 ) -> TrainingResult:
-    """Estimate negative-feedback L, then search dp at that fixed L."""
+    """Estimate positive-feedback L, then search dp at that fixed L."""
     elements = _single_example(dataloader)
     target_wave = elements[0].squeeze(0)[..., 1:].flatten()
     sample_rate = float(torch.as_tensor(elements[1]).flatten()[0])
@@ -439,14 +439,14 @@ def train_pluck_pitch(
             leading.square().sum() * lagging.square().sum()
         ).clamp_min(1e-12)
         correlations.append((leading * lagging).sum() / normalization)
-    anti_period = int(model.L_candidates[0]) + int(
-        torch.argmin(torch.stack(correlations)).item()
+    period = int(model.L_candidates[0]) + int(
+        torch.argmax(torch.stack(correlations)).item()
     )
     a = _scalar_value(model.scaled_allplus())
     loop_filter_delay = 0.5 + (1.0 - a) / (1.0 + a)
-    L = round(anti_period - loop_filter_delay)
+    L = round(period - loop_filter_delay)
     L = max(int(model.L_candidates[0]), min(int(model.L_candidates[-1]), L))
-    frequency = sample_rate / (2.0 * anti_period)
+    frequency = sample_rate / period
     result = train_pluck_exhaustive(model, dataloader, config, fixed_L=L)
     result.metadata["estimated_frequency"] = frequency
     return result

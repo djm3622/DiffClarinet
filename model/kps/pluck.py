@@ -12,7 +12,7 @@ class KarplusStrongPluck(KarplusStrongFixed):
     """Learn integer loop delay L and pluck-filter delay dp from a unit impulse.
 
     The MATLAB generator uses input -K * (delta[n] - delta[n-dp]) and
-    feedback -K * y[n-L]. Candidate pairs with dp >= L are excluded.
+    feedback +K * y[n-L]. Candidate pairs with dp >= L are excluded.
     """
 
     def __init__(
@@ -171,7 +171,7 @@ class KarplusStrongPluck(KarplusStrongFixed):
         a = self.scaled_allplus() if allpass is None else allpass
         z = self.z
         numerator = a / 2 + (a + 1) / 2 * z.pow(-1) + 0.5 * z.pow(-2)
-        denominator = 1 + a * z.pow(-1) + K * numerator * z.pow(-delay_len)
+        denominator = 1 + a * z.pow(-1) - K * numerator * z.pow(-delay_len)
         return -K * (1 - z.pow(-dp)) * numerator / denominator
 
     def time_domain_synth(
@@ -197,7 +197,7 @@ class KarplusStrongPluck(KarplusStrongFixed):
         denominator = excitation.new_zeros(L + 3)
         denominator[0] = 1
         denominator[1] = a
-        denominator[L:L + 3] += K * numerator
+        denominator[L:L + 3] -= K * numerator
         return torchaudio.functional.lfilter(
             excitation, denominator, b, clamp=False
         )
