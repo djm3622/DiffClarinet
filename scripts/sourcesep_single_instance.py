@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 from data.dataset import MatlabPluckData, MatlabTriangleData
 from data.helpers import file_processing
-from model.kps.objectives.frequency import loss_fn
+from model.kps.objectives.frequency import loss_fn, to_log_mag
 from model.kps.pluck import KarplusStrongPluck
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
 from model.kps.training import TriangleFitConfig, fit_triangle
@@ -176,6 +176,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
+        spectrum_normalization=getattr(args, "spectrum_normalization", "peak"),
         exhaustive_cap=args.exhaustive_cap,
         show_progress=getattr(args, "show_progress", True),
     )
@@ -210,6 +211,10 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "snr_db": float(10 * torch.log10(target.square().sum().clamp_min(1e-20)
                                        / error.square().sum().clamp_min(1e-20))),
         "spectral_loss": float(loss_fn(fft.rfft(mixture), fft.rfft(target))),
+        "absolute_spectral_loss": float((
+            to_log_mag(fft.rfft(mixture), rel_to_max=False)
+            - to_log_mag(fft.rfft(target), rel_to_max=False)
+        ).abs().mean()),
     }
     output = Path(args.output_dir or "output/sourcesep_triangle_single_instance")
     output.mkdir(parents=True, exist_ok=True)
@@ -227,6 +232,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
@@ -279,6 +285,8 @@ def main() -> None:
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
+    parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
+                        default="peak")
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")

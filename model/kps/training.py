@@ -20,7 +20,7 @@ from .delay_methods import (
 from .dkps_fixed import KarplusStrongFixed
 from .pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from .triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
-from .objectives.frequency import loss_fn
+from .objectives.frequency import loss_fn, to_log_mag
 
 
 @dataclass(frozen=True)
@@ -850,6 +850,7 @@ class TriangleFitConfig:
     final_uniform_prior_weight: float = 1e-3
     ordinal_smoothness_weight: float = 1e-4
     advantage_clip: float = 5.0
+    spectrum_normalization: str = "peak"
     gumbel_temperature: float = 1.0
     exhaustive_cap: int = 10000
     show_progress: bool = False
@@ -857,6 +858,8 @@ class TriangleFitConfig:
     def __post_init__(self) -> None:
         if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
             raise ValueError("Unsupported triangle fitting method.")
+        if self.spectrum_normalization not in {"peak", "none"}:
+            raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
         if min(self.epochs, self.refine_epochs) < 0 or self.n_fft < 1:
             raise ValueError("Invalid training budget or FFT length.")
         if self.method in {"reinforce", "relaxation"} and self.reinforce_samples < 2:
@@ -925,8 +928,19 @@ def _record_triangle_step(result: TriangleFitResult,
     ])
 
 
-def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor) -> torch.Tensor:
-    return loss_fn(torch.fft.rfft(prediction), target_spectrum)
+def _triangle_spectral_loss(prediction: torch.Tensor,
+                            target_spectrum: torch.Tensor,
+                            normalization: str) -> torch.Tensor:
+    if normalization == "peak":
+        return loss_fn(prediction, target_spectrum)
+    return (to_log_mag(prediction, rel_to_max=False)
+            - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
+
+
+def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
+          normalization: str) -> torch.Tensor:
+    return _triangle_spectral_loss(torch.fft.rfft(prediction),
+                                   target_spectrum, normalization)
 
 
 def _pitch_lengths(audio: torch.Tensor, models: nn.ModuleList) -> list[int]:
@@ -969,7 +983,8 @@ def _enumerate(models: nn.ModuleList, target: torch.Tensor,
     with torch.no_grad():
         for pairs in product(*allowed):
             prediction = _synth(models, config.n_fft, list(pairs))
-            score = float(_loss(prediction, target_spectrum))
+            score = float(_loss(prediction, target_spectrum,
+                                config.spectrum_normalization))
             if score < best_score:
                 best_score, best_pairs = score, list(pairs)
     if best_pairs is None:
@@ -1035,9 +1050,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
             if method == "reinforce":
                 samples = [model.sample_pairs(config.reinforce_samples) for model in models]
                 losses = torch.stack([
-                    loss_fn(_triangle_spectrum(
+                    _triangle_spectral_loss(_triangle_spectrum(
                         models, [source[0][i] for source in samples]),
-                        target_spectrum)
+                        target_spectrum, config.spectrum_normalization)
                     for i in range(config.reinforce_samples)])
                 detached = losses.detach()
                 baseline = (detached.sum() - detached) / (config.reinforce_samples - 1)
@@ -1084,9 +1099,11 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                     surrogate_parts.append(surrogate)
                 causal_spectrum = torch.stack(causal_parts).sum(0)
                 surrogate_spectrum = torch.stack(surrogate_parts).sum(0)
-                measured = loss_fn(causal_spectrum, target_spectrum)
-                objective = loss_fn(causal_spectrum + surrogate_spectrum
-                                    - surrogate_spectrum.detach(), target_spectrum)
+                measured = _triangle_spectral_loss(
+                    causal_spectrum, target_spectrum, config.spectrum_normalization)
+                objective = _triangle_spectral_loss(
+                    causal_spectrum + surrogate_spectrum - surrogate_spectrum.detach(),
+                    target_spectrum, config.spectrum_normalization)
             else:
                 losses, log_probabilities = [], []
                 for i in range(config.reinforce_samples):
@@ -1106,8 +1123,9 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                             allpass=model.scaled_allplus().detach()))
                     causal = torch.fft.rfft(_synth(models, config.n_fft, pairs))
                     surrogate = torch.stack(spectral_parts).sum(0)
-                    losses.append(loss_fn(causal + surrogate - surrogate.detach(),
-                                          target_spectrum))
+                    losses.append(_triangle_spectral_loss(
+                        causal + surrogate - surrogate.detach(),
+                        target_spectrum, config.spectrum_normalization))
                 losses = torch.stack(losses)
                 detached = losses.detach()
                 baseline = (detached.sum() - detached) / (config.reinforce_samples - 1)
@@ -1146,7 +1164,8 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                            disable=not config.show_progress)
         for epoch_index in phase_two:
             optimizer.zero_grad()
-            measured = _loss(_synth(models, config.n_fft, pairs), target_spectrum)
+            measured = _loss(_synth(models, config.n_fft, pairs), target_spectrum,
+                             config.spectrum_normalization)
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()

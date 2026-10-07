@@ -295,6 +295,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
+        spectrum_normalization=getattr(args, "spectrum_normalization", "peak"),
         exhaustive_cap=args.exhaustive_cap,
         show_progress=getattr(args, "show_progress", True),
     )
@@ -306,6 +307,10 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
             target.numel(), impulse, *result.pairs[0]).detach()
         rmse = float((prediction - target).square().mean().sqrt())
         spectral_loss = float(loss_fn(fft.rfft(prediction), fft.rfft(target)))
+        absolute_spectral_loss = float((
+            to_log_mag(fft.rfft(prediction), rel_to_max=False)
+            - to_log_mag(fft.rfft(target), rel_to_max=False)
+        ).abs().mean())
 
     # Ground truth is read only after the optimizer has finished.
     metadata = loadmat(wav_path.with_suffix(".mat"),
@@ -324,6 +329,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
@@ -338,6 +344,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         "training_wall_seconds": wall_seconds,
         "selected": estimate, "true": truth,
         "causal_rmse": rmse, "causal_spectral_loss": spectral_loss,
+        "causal_absolute_spectral_loss": absolute_spectral_loss,
         "manifest": manifest,
     }
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -400,6 +407,8 @@ def main() -> None:
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
+    parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
+                        default="peak")
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")
