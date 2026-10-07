@@ -848,6 +848,7 @@ class TriangleFitConfig:
     discrete_lr: float = 3e-3
     initial_uniform_prior_weight: float = 5e-2
     final_uniform_prior_weight: float = 1e-3
+    prior_anneal_epochs: int = 5_000
     ordinal_smoothness_weight: float = 1e-4
     advantage_clip: float = 5.0
     spectrum_normalization: str = "none"
@@ -863,6 +864,8 @@ class TriangleFitConfig:
             raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
         if self.print_frequency < 1:
             raise ValueError("Print frequency must be positive.")
+        if self.prior_anneal_epochs < 1:
+            raise ValueError("Prior anneal epochs must be positive.")
         if min(self.epochs, self.refine_epochs) < 0 or self.n_fft < 1:
             raise ValueError("Invalid training budget or FFT length.")
         if self.method in {"reinforce", "relaxation"} and self.reinforce_samples < 2:
@@ -996,7 +999,8 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         advantage = (detached - baseline) / (detached - baseline).std(
             unbiased=False).clamp_min(1e-6)
         log_probs = torch.stack([source[1] for source in samples]).sum(0)
-        progress = epoch_index / max(config.epochs - 1, 1)
+        anneal_epochs = min(config.epochs, config.prior_anneal_epochs)
+        progress = min(epoch_index / max(anneal_epochs - 1, 1), 1.0)
         prior_weight = (config.initial_uniform_prior_weight + progress
                         * (config.final_uniform_prior_weight
                            - config.initial_uniform_prior_weight))

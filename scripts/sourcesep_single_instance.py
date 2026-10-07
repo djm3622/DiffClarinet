@@ -180,6 +180,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
             args, "initial_uniform_prior_weight", 5e-2),
         final_uniform_prior_weight=getattr(
             args, "final_uniform_prior_weight", 1e-3),
+        prior_anneal_epochs=getattr(args, "prior_anneal_epochs", 5_000),
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
@@ -261,6 +262,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,
+            "prior_anneal_epochs": config.prior_anneal_epochs,
             "ordinal_smoothness_weight": config.ordinal_smoothness_weight,
             "advantage_clip": config.advantage_clip,
         } if args.method == "reinforce" else None,
@@ -305,6 +307,7 @@ def main() -> None:
     parser.add_argument("--reinforce-samples", type=int, default=8)
     parser.add_argument("--initial-uniform-prior-weight", type=float, default=5e-2)
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
+    parser.add_argument("--prior-anneal-epochs", type=int, default=5_000)
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
@@ -417,6 +420,7 @@ def main() -> None:
         reinforce_samples=reinforce_samples,
         initial_uniform_prior_weight=args.initial_uniform_prior_weight,
         final_uniform_prior_weight=args.final_uniform_prior_weight,
+        prior_anneal_epochs=args.prior_anneal_epochs,
         ordinal_smoothness_weight=args.ordinal_smoothness_weight,
         advantage_clip=args.advantage_clip,
         spectrum_normalization=args.spectrum_normalization,
@@ -484,6 +488,7 @@ def main() -> None:
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,
+            "prior_anneal_epochs": config.prior_anneal_epochs,
             "ordinal_smoothness_weight": config.ordinal_smoothness_weight,
             "advantage_clip": config.advantage_clip,
         },
