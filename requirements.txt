@@ -51,7 +51,6 @@ tensorboard-data-server==0.7.2
 torch==2.12.1
 torchaudio==2.11.0
 torchcodec==0.14.0
-PyYAML==6.0.3
 tornado==6.5.7
 tqdm==4.68.4
 traitlets==5.15.1

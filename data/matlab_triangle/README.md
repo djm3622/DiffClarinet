@@ -12,9 +12,21 @@ optimization solely for reporting. If too many examples are rejected, generate
 unscaled float audio with appropriate range rather than clipping or silently
 training on normalized targets.
 
-Set `dataset_dir` and `indices` in `config/triangle.yaml`, then run
-`python -m scripts.triangle_experiment --config config/triangle.yaml`.
-Use two or more indices for known-source-count mixture fitting. A small smoke
-run can override settings, for example `--set epochs=2 --set refine_epochs=2`.
+Run a single instance:
+
+```sh
+python -m scripts.train_single_instance --data-mode triangle \
+  --method reinforce --train-index 0 --dataset-dir data/vary_all_triangle
+```
+
+Run a known-count mixture:
+
+```sh
+python -m scripts.sourcesep_single_instance --data-mode triangle \
+  --method reinforce --indices 0 1 --dataset-dir data/vary_all_triangle
+```
+
+Both scripts accept candidate bounds, FFT size, seed, and training budgets
+as command-line arguments.
 The `pitch` and `exhaustive` methods may exceed the configured joint search
 cap for mixtures; they fail with the required evaluation count.

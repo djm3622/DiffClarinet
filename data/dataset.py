@@ -107,8 +107,11 @@ class MatlabTriangleData(Dataset):
                 raise ValueError(f"Wrong target sample count: {wav_path}")
             if waveform[0, 0].abs() > 1e-6:
                 raise ValueError(f"Missing leading zero: {wav_path}")
-            if not torch.isfinite(waveform).all() or waveform.abs().max() >= 0.99999:
-                raise ValueError(f"Nonfinite or potentially clipped target: {wav_path}")
+            if not torch.isfinite(waveform).all():
+                raise ValueError(f"Nonfinite target: {wav_path}")
+            if (manifest["audio_format"] == "24-bit PCM WAV"
+                    and waveform.abs().max() >= 0.99999):
+                raise ValueError(f"Potentially clipped PCM target: {wav_path}")
             self.examples.append((waveform[0, 1:].contiguous(), sample_rate,
                                   torch.ones(1, dtype=waveform.dtype)))
 

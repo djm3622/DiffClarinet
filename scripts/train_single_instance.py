@@ -6,13 +6,16 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import fft
+from torch import nn
 from torch.utils.data import DataLoader
+from scipy.io import loadmat, wavfile
 
-from data.dataset import MatlabData, MatlabPluckData
+from data.dataset import MatlabData, MatlabPluckData, MatlabTriangleData
 from data.helpers import file_processing
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
 from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
+from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
 from model.kps.delay_methods import (
     KarplusStrongExhaustive,
     KarplusStrongGumbelSoftmax,
@@ -30,6 +33,8 @@ from model.kps.training import (
     train_pluck_reinforce,
     train_pluck_relaxation,
     refine_pluck_continuous,
+    TriangleFitConfig,
+    fit_triangle,
 )
 
 from .eval import listening, loss_landscape, plots
@@ -244,6 +249,86 @@ def _train_pluck_instance(
     )
 
 
+def _train_triangle_instance(args: argparse.Namespace) -> None:
+    """Fit L, A, K, a from one validated causal triangle target."""
+    if args.method == "causal":
+        raise ValueError("Triangle causal refinement requires an audio-derived pair.")
+    directory = Path(args.dataset_dir or "data/vary_all_triangle")
+    manifest = json.loads((directory / "manifest.json").read_text())
+    wav_paths = sorted(directory.glob("*.wav"))
+    if not 0 <= args.train_index < len(wav_paths):
+        raise IndexError("Triangle train index is outside the dataset.")
+    wav_path = wav_paths[args.train_index]
+    dataset = MatlabTriangleData([str(wav_path)], manifest)
+    target, sample_rate, impulse = dataset[0]
+    if args.n_fft > target.numel():
+        raise ValueError("FFT window exceeds causal target length.")
+    model_kwargs = dict(
+        delay_len_min=args.L_min, delay_len_max=args.L_max,
+        A_min=args.A_min, A_max=args.A_max, n_fft=args.n_fft,
+        all_plus=True, all_plus_learnable=True,
+        delay_gain_learnable=True, random_init=False,
+        delay_gain=args.initial_K, a=args.initial_a,
+    )
+    if args.method == "relaxation":
+        model = KarplusStrongTriangleRelaxation(
+            delay_len_init=args.initial_L, **model_kwargs)
+    else:
+        model = KarplusStrongTriangle(**model_kwargs)
+    with torch.no_grad():
+        initial = model.time_domain_synth(target.numel(), impulse).detach()
+    config = TriangleFitConfig(
+        method=args.method, epochs=args.epochs,
+        refine_epochs=args.refine_epochs, n_fft=args.n_fft,
+        reinforce_samples=args.reinforce_samples,
+        exhaustive_cap=args.exhaustive_cap,
+    )
+    start = time.perf_counter()
+    result = fit_triangle(nn.ModuleList([model]), target, config)
+    wall_seconds = time.perf_counter() - start
+    with torch.no_grad():
+        prediction = model.time_domain_synth(
+            target.numel(), impulse, *result.pairs[0]).detach()
+        rmse = float((prediction - target).square().mean().sqrt())
+        spectral_loss = float(loss_fn(fft.rfft(prediction), fft.rfft(target)))
+
+    # Ground truth is read only after the optimizer has finished.
+    metadata = loadmat(wav_path.with_suffix(".mat"),
+                       variable_names=["delay_gain", "a", "L", "A"])
+    truth = {key: float(metadata[field].item()) for key, field in
+             (("K", "delay_gain"), ("a", "a"), ("L", "L"), ("A", "A"))}
+    estimate = {"K": _scalar_value(model.scaled_gain()),
+                "a": _scalar_value(model.scaled_allplus()),
+                "L": result.pairs[0][0], "A": result.pairs[0][1]}
+    output = Path(args.output_dir or (
+        f"output/triangle_single_instance/{args.train_index:05d}/{args.method}"))
+    output.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "method": args.method, "seed": args.seed, "sample": wav_path.name,
+        "candidate_bounds": {"L": [args.L_min, args.L_max],
+                             "A": [args.A_min, args.A_max]},
+        "n_fft": args.n_fft, "epochs": args.epochs,
+        "refine_epochs": args.refine_epochs,
+        "search_evaluations": result.search_evaluations,
+        "estimated_periods": result.estimated_periods,
+        "training_wall_seconds": wall_seconds,
+        "selected": estimate, "true": truth,
+        "causal_rmse": rmse, "causal_spectral_loss": spectral_loss,
+        "manifest": manifest,
+    }
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    np.savez_compressed(output / "trajectory.npz",
+                        loss=np.asarray(result.losses),
+                        pairs=np.asarray(result.trajectory))
+    for name, audio in (("target", target), ("initial_synthesis", initial),
+                        ("selected_synthesis", prediction)):
+        wavfile.write(output / f"{name}.wav", sample_rate,
+                      audio.cpu().numpy().astype(np.float32))
+    print(json.dumps({"output": str(output), "selected": estimate,
+                      "true": truth, "causal_rmse": rmse,
+                      "causal_spectral_loss": spectral_loss}, indent=2))
+
+
 def main() -> None:
     # data setup
     """
@@ -260,7 +345,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--data-mode", choices=("pluck", "legacy"), default="pluck"
+        "--data-mode", choices=("pluck", "triangle", "legacy"), default="pluck"
     )
     parser.add_argument(
         "--method",
@@ -275,10 +360,26 @@ def main() -> None:
     parser.add_argument("--refine-epochs", type=int, default=2_000)
     parser.add_argument("--n-fft", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=2)
+    parser.add_argument("--dataset-dir", type=str)
+    parser.add_argument("--output-dir", type=str)
+    parser.add_argument("--L-min", type=int, default=100)
+    parser.add_argument("--L-max", type=int, default=200)
+    parser.add_argument("--A-min", type=int, default=1)
+    parser.add_argument("--A-max", type=int, default=100)
+    parser.add_argument("--initial-K", type=float, default=0.9)
+    parser.add_argument("--initial-a", type=float, default=0.5)
+    parser.add_argument("--initial-L", type=float, default=150.5)
+    parser.add_argument("--reinforce-samples", type=int, default=4)
+    parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     args = parser.parse_args()
     seed = args.seed
     data_mode = args.data_mode
     delay_method = None if args.method == "causal" else args.method
+    if data_mode == "triangle":
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        _train_triangle_instance(args)
+        return
     if data_mode == "pluck":
         np.random.seed(seed)
         torch.manual_seed(seed)
