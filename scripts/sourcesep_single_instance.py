@@ -256,7 +256,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
-        "initialization": "seeded_random_K_a"
+        "initialization": "seeded_random_L_A_K_a"
         if args.method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
@@ -482,7 +482,7 @@ def main() -> None:
         "reinforce_fit_domain": "circular_transfer_function",
         "refinement_domain": "finite_causal",
         "excitation_filter": "two_tap_comb",
-        "initialization": "seeded_random_K_a",
+        "initialization": "seeded_random_L_dp_K_a",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,

@@ -36,6 +36,9 @@ class KarplusStrongPluck(KarplusStrongFixed):
         self.register_buffer("dp_candidates", torch.arange(dp_min, dp_max + 1))
         self.L_logits = nn.Parameter(torch.zeros(self.L_candidates.numel()))
         self.dp_logits = nn.Parameter(torch.zeros(self.dp_candidates.numel()))
+        if kwargs.get("random_init", True):
+            nn.init.uniform_(self.L_logits, -1e-3, 1e-3)
+            nn.init.uniform_(self.dp_logits, -1e-3, 1e-3)
         self.fixed_L: int | None = None
 
     def _joint_logits(self) -> torch.Tensor:

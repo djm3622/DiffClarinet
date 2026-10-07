@@ -247,7 +247,7 @@ def _train_pluck_instance(
         "refinement_domain": "finite_causal"
         if delay_method == "reinforce" else None,
         "excitation_filter": "two_tap_comb",
-        "initialization": "seeded_random_K_a"
+        "initialization": "seeded_random_L_dp_K_a"
         if delay_method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": filtered_config.initial_uniform_prior_weight,
@@ -400,7 +400,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
-        "initialization": "seeded_random_K_a"
+        "initialization": "seeded_random_L_A_K_a"
         if args.method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,

@@ -37,6 +37,9 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         self.register_buffer("A_candidates", torch.arange(A_min, A_max + 1))
         self.L_logits = nn.Parameter(torch.zeros(self.L_candidates.numel()))
         self.A_logits = nn.Parameter(torch.zeros(self.A_candidates.numel()))
+        if kwargs.get("random_init", True):
+            nn.init.uniform_(self.L_logits, -1e-3, 1e-3)
+            nn.init.uniform_(self.A_logits, -1e-3, 1e-3)
         if self.valid_pair_count() == 0:
             raise ValueError("Candidate grid contains no valid (L, A) pair.")
 
