@@ -253,9 +253,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
         "spectrum_normalization": config.spectrum_normalization,
-        "reinforce_fit_domain": "circular_transfer_function"
+        "reinforce_fit_domain": "finite_causal"
         if args.method == "reinforce" else None,
-        "phase1_target": "full_waveform_folded_to_fft_grid"
+        "phase1_target": "first_n_fft_causal_samples"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
@@ -483,8 +483,8 @@ def main() -> None:
         "n_fft": n_fft, "epochs": delay_epochs,
         "refine_epochs": continuous_epochs,
         "spectrum_normalization": config.spectrum_normalization,
-        "reinforce_fit_domain": "circular_transfer_function",
-        "phase1_target": "full_waveform_folded_to_fft_grid",
+        "reinforce_fit_domain": "finite_causal",
+        "phase1_target": "first_n_fft_causal_samples",
         "refinement_domain": "finite_causal",
         "excitation_filter": "two_tap_comb",
         "initialization": "seeded_random_L_dp_K_a",

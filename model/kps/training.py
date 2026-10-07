@@ -896,22 +896,6 @@ def _synth(models: nn.ModuleList, n: int,
                         for model, pair in zip(models, pairs)]).sum(0)
 
 
-def _triangle_spectrum(models: nn.ModuleList,
-                       pairs: list[tuple[int, int]]) -> torch.Tensor:
-    """Sum circular transfer-function predictions for sampled integer pairs."""
-    return torch.stack([
-        model.spectral_response(model.L_logits.new_ones(1), *pair)
-        for model, pair in zip(models, pairs)
-    ]).sum(0)
-
-
-def _folded_target_spectrum(target: torch.Tensor, n_fft: int) -> torch.Tensor:
-    """Evaluate the full observed response on the circular model's FFT grid."""
-    pad = (-target.numel()) % n_fft
-    folded = F.pad(target, (0, pad)).reshape(-1, n_fft).sum(0)
-    return torch.fft.rfft(folded)
-
-
 def _triangle_regularization(models: nn.ModuleList, prior_weight: float,
                              smoothness_weight: float,
                              position: str = "A") -> torch.Tensor:
@@ -977,8 +961,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
     if indices is not None and len(indices) != len(models):
         raise ValueError("Each source must have one display index.")
 
-    circular_target_spectrum = _folded_target_spectrum(target, config.n_fft)
-    causal_target_spectrum = torch.fft.rfft(target[:config.n_fft])
+    target_spectrum = torch.fft.rfft(target[:config.n_fft])
     second_name = "A_logits" if position == "A" else "dp_logits"
     discrete = [parameter for model in models for parameter in
                 (model.L_logits, getattr(model, second_name))]
@@ -997,9 +980,9 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
                    if position == "A" else model.sample_delay_pairs(config.reinforce_samples)
                    for model in models]
         losses = torch.stack([
-            _triangle_spectral_loss(
-                _triangle_spectrum(models, [source[0][i] for source in samples]),
-                circular_target_spectrum, config.spectrum_normalization)
+            _loss(_synth(models, config.n_fft,
+                         [source[0][i] for source in samples]),
+                  target_spectrum, config.spectrum_normalization)
             for i in range(config.reinforce_samples)
         ])
         detached = losses.detach()
@@ -1043,7 +1026,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         for epoch_index in phase_two:
             optimizer.zero_grad()
             measured = _loss(_synth(models, config.n_fft, result.pairs),
-                             causal_target_spectrum, config.spectrum_normalization)
+                             target_spectrum, config.spectrum_normalization)
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
@@ -1130,7 +1113,7 @@ def _continuous_parameters(models: nn.ModuleList) -> list[nn.Parameter]:
 def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                  config: TriangleFitConfig,
                  indices: list[int] | None = None) -> TriangleFitResult:
-    """Fit from the mixture; REINFORCE uses circular spectra, refinement causal."""
+    """Fit from the mixture; REINFORCE uses causal synthesis in both phases."""
     if config.method == "reinforce":
         return fit_filtered_reinforce(models, target, config, "A", indices)
     if not models or target.ndim != 1 or target.numel() < config.n_fft:

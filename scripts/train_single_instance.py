@@ -243,9 +243,9 @@ def _train_pluck_instance(
         "total_training_steps": len(result.reconstruction_losses),
         "spectrum_normalization": args.spectrum_normalization
         if delay_method == "reinforce" else "peak",
-        "reinforce_fit_domain": "circular_transfer_function"
+        "reinforce_fit_domain": "finite_causal"
         if delay_method == "reinforce" else None,
-        "phase1_target": "full_waveform_folded_to_fft_grid"
+        "phase1_target": "first_n_fft_causal_samples"
         if delay_method == "reinforce" else None,
         "refinement_domain": "finite_causal"
         if delay_method == "reinforce" else None,
@@ -401,9 +401,9 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         "refine_epochs": args.refine_epochs,
         "total_training_steps": len(result.losses),
         "spectrum_normalization": config.spectrum_normalization,
-        "reinforce_fit_domain": "circular_transfer_function"
+        "reinforce_fit_domain": "finite_causal"
         if args.method == "reinforce" else None,
-        "phase1_target": "full_waveform_folded_to_fft_grid"
+        "phase1_target": "first_n_fft_causal_samples"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
