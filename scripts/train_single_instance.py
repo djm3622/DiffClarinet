@@ -26,6 +26,7 @@ from model.kps.delay_methods import (
 from model.kps.objectives.frequency import to_log_mag, loss_fn
 from model.kps.training import (
     TrainingConfig,
+    TrainingResult,
     train_model,
     train_pluck_exhaustive,
     train_pluck_gumbel,
@@ -35,6 +36,7 @@ from model.kps.training import (
     refine_pluck_continuous,
     TriangleFitConfig,
     fit_triangle,
+    fit_filtered_reinforce,
 )
 
 from .eval import listening, loss_landscape, plots
@@ -59,6 +61,7 @@ def _train_pluck_instance(
     epochs: int,
     n_fft: int,
     refine_epochs: int,
+    args: argparse.Namespace,
 ) -> None:
     """Fit integer L and dp using a raw one-sample unit impulse."""
     if delay_method not in {
@@ -66,7 +69,7 @@ def _train_pluck_instance(
     }:
         raise ValueError(f"Unknown pluck delay method: {delay_method}")
     method_name = delay_method or "causal"
-    directory = "data/vary_all_pluck/"
+    directory = args.dataset_dir or "data/vary_all_pluck/"
     wav_paths = file_processing.sort_file_path_list(
         file_processing.get_files_in_dir_wav(directory)
     )
@@ -90,27 +93,24 @@ def _train_pluck_instance(
     unit_impulse = dataset.excs[0]
     print(f"Training sample: {Path(wav_paths[train_index]).name}")
     print(f"Input impulse: {unit_impulse.tolist()}")
-    print(
-        f"True K={true_gain}, a={true_a}, L={true_L}, dp={true_dp}"
-    )
 
     learn_continuous = True
     model_kwargs = dict(
-        delay_len_min=100,
-        delay_len_max=200,
-        dp_min=1,
-        dp_max=100,
+        delay_len_min=args.L_min,
+        delay_len_max=args.L_max,
+        dp_min=args.dp_min,
+        dp_max=args.dp_max,
         n_fft=n_fft,
         all_plus=True,
         all_plus_learnable=learn_continuous,
         delay_gain_learnable=learn_continuous,
-        delay_gain=0.9,
-        a=0.5,
-        random_init=False,
+        delay_gain=args.initial_K,
+        a=args.initial_a,
+        random_init=delay_method == "reinforce",
     )
     if delay_method == "relaxation":
         model = KarplusStrongPluckRelaxation(
-            delay_len_init=150.5, **model_kwargs
+            delay_len_init=args.initial_L, **model_kwargs
         )
     else:
         model = KarplusStrongPluck(**model_kwargs)
@@ -130,6 +130,9 @@ def _train_pluck_instance(
     initial_waveform = model.time_domain_synth(
         n_samples, unit_impulse
     ).detach()
+    initial_K = _scalar_value(model.scaled_gain())
+    initial_a = _scalar_value(model.scaled_allplus())
+    initial_L, initial_dp = model.selected_delays()
 
     dataloader = DataLoader(
         dataset,
@@ -139,7 +142,29 @@ def _train_pluck_instance(
     )
     training_config = TrainingConfig(epochs=epochs, n_fft=n_fft)
     training_start = time.perf_counter()
-    if delay_method in {None, "reinforce"}:
+    if delay_method == "reinforce":
+        filtered_config = TriangleFitConfig(
+            method="reinforce", epochs=epochs, refine_epochs=refine_epochs,
+            n_fft=n_fft, reinforce_samples=args.reinforce_samples,
+            initial_uniform_prior_weight=args.initial_uniform_prior_weight,
+            final_uniform_prior_weight=args.final_uniform_prior_weight,
+            ordinal_smoothness_weight=args.ordinal_smoothness_weight,
+            advantage_clip=args.advantage_clip,
+            spectrum_normalization=args.spectrum_normalization,
+            print_frequency=args.print_frequency,
+            show_progress=args.show_progress,
+        )
+        filtered = fit_filtered_reinforce(
+            nn.ModuleList([model]), target_waveform[1:], filtered_config, "dp",
+            [train_index])
+        result = TrainingResult(
+            reconstruction_losses=filtered.losses,
+            gain_trajectory=[initial_K] + [row[0] for row in filtered.gain_trajectory],
+            allpass_trajectory=[initial_a] + [row[0] for row in filtered.allpass_trajectory],
+            delay_trajectory=[initial_L] + [row[0][0] for row in filtered.trajectory],
+            dp_trajectory=[initial_dp] + [row[0][1] for row in filtered.trajectory],
+        )
+    elif delay_method is None:
         result = train_pluck_reinforce(model, dataloader, training_config)
     elif delay_method == "gumbel":
         result = train_pluck_gumbel(model, dataloader, training_config)
@@ -181,6 +206,11 @@ def _train_pluck_instance(
     spectral_loss = loss_fn(
         fft.rfft(selected_waveform), fft.rfft(target)
     )
+    absolute_spectral_loss = float((
+        to_log_mag(fft.rfft(selected_waveform), rel_to_max=False)
+        - to_log_mag(fft.rfft(target), rel_to_max=False)
+    ).abs().mean())
+    print(f"True K={true_gain}, a={true_a}, L={true_L}, dp={true_dp}")
     print(
         f"Selected K={_scalar_value(model.scaled_gain()):.6f}, "
         f"a={_scalar_value(model.scaled_allplus()):.6f}, "
@@ -189,15 +219,15 @@ def _train_pluck_instance(
     )
     print(f"Finite-causal RMSE: {float(rmse):.6f}")
     print(f"Finite-causal spectral loss: {float(spectral_loss):.6f}")
+    print(f"Finite-causal absolute spectral loss: {absolute_spectral_loss:.6f}")
     print(f"Recorded {len(result.reconstruction_losses)} training steps")
     print(f"Training/search wall time: {training_wall_seconds:.1f} s")
 
     for name, value in result.metadata.items():
         print(f"{name}: {value}")
 
-    output_dir = Path(
-        f"output/pluck_single_instance/{train_index:05d}/{method_name}"
-    )
+    output_dir = Path(args.output_dir or
+                      f"output/pluck_single_instance/{train_index:05d}/{method_name}")
     output_dir.mkdir(parents=True, exist_ok=True)
     selected_L = _delay_value(model.scaled_delay_len())
     summary = {
@@ -205,7 +235,26 @@ def _train_pluck_instance(
         "seed": seed,
         "sample": Path(wav_paths[train_index]).name,
         "n_fft": training_config.n_fft,
-        "epochs": len(result.reconstruction_losses),
+        "epochs": epochs if delay_method == "reinforce"
+        else len(result.reconstruction_losses),
+        "fit_epochs": epochs if delay_method == "reinforce" else None,
+        "refine_epochs": refine_epochs if delay_method == "reinforce" else None,
+        "total_training_steps": len(result.reconstruction_losses),
+        "spectrum_normalization": args.spectrum_normalization
+        if delay_method == "reinforce" else "peak",
+        "reinforce_fit_domain": "circular_transfer_function"
+        if delay_method == "reinforce" else None,
+        "refinement_domain": "finite_causal"
+        if delay_method == "reinforce" else None,
+        "excitation_filter": "two_tap_comb",
+        "initialization": "seeded_random_K_a"
+        if delay_method == "reinforce" else "configured",
+        "reinforce_stability": {
+            "initial_uniform_prior_weight": filtered_config.initial_uniform_prior_weight,
+            "final_uniform_prior_weight": filtered_config.final_uniform_prior_weight,
+            "ordinal_smoothness_weight": filtered_config.ordinal_smoothness_weight,
+            "advantage_clip": filtered_config.advantage_clip,
+        } if delay_method == "reinforce" else None,
         "training_wall_seconds": training_wall_seconds,
         "true": {
             "K": true_gain,
@@ -222,6 +271,7 @@ def _train_pluck_instance(
         },
         "causal_rmse": float(rmse),
         "causal_spectral_loss": float(spectral_loss),
+        "causal_absolute_spectral_loss": absolute_spectral_loss,
         "metadata": result.metadata,
     }
     (output_dir / "summary.json").write_text(
@@ -268,7 +318,7 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         delay_len_min=args.L_min, delay_len_max=args.L_max,
         A_min=args.A_min, A_max=args.A_max, n_fft=args.n_fft,
         all_plus=True, all_plus_learnable=True,
-        delay_gain_learnable=True, random_init=False,
+        delay_gain_learnable=True, random_init=args.method == "reinforce",
         delay_gain=args.initial_K, a=args.initial_a,
     )
     if args.method == "relaxation":
@@ -282,6 +332,12 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         f"{args.epochs} fit + {args.refine_epochs} refinement epochs",
         flush=True,
     )
+    print(f"Method: {args.method}")
+    print(f"Input impulse: {impulse.tolist()}")
+    initial_L, initial_A = model.selected_delays()
+    print(f"Initial K={_scalar_value(model.scaled_gain()):.6f}, "
+          f"a={_scalar_value(model.scaled_allplus()):.6f}, "
+          f"L={initial_L}, A={initial_A}")
     with torch.no_grad():
         initial = model.time_domain_synth(target.numel(), impulse).detach()
     config = TriangleFitConfig(
@@ -295,12 +351,14 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
-        spectrum_normalization=getattr(args, "spectrum_normalization", "peak"),
+        spectrum_normalization=getattr(args, "spectrum_normalization", "none"),
+        print_frequency=getattr(args, "print_frequency", 1000),
         exhaustive_cap=args.exhaustive_cap,
         show_progress=getattr(args, "show_progress", True),
     )
     start = time.perf_counter()
-    result = fit_triangle(nn.ModuleList([model]), target, config)
+    result = fit_triangle(nn.ModuleList([model]), target, config,
+                          [args.train_index])
     wall_seconds = time.perf_counter() - start
     with torch.no_grad():
         prediction = model.time_domain_synth(
@@ -320,6 +378,13 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
     estimate = {"K": _scalar_value(model.scaled_gain()),
                 "a": _scalar_value(model.scaled_allplus()),
                 "L": result.pairs[0][0], "A": result.pairs[0][1]}
+    print(f"True K={truth['K']:.6f}, a={truth['a']:.6f}, "
+          f"L={int(truth['L'])}, A={int(truth['A'])}")
+    print(f"Selected K={estimate['K']:.6f}, a={estimate['a']:.6f}, "
+          f"L={estimate['L']}, A={estimate['A']}")
+    print(f"Finite-causal RMSE: {rmse:.6f}")
+    print(f"Finite-causal spectral loss: {spectral_loss:.6f}")
+    print(f"Finite-causal absolute spectral loss: {absolute_spectral_loss:.6f}")
     output = Path(args.output_dir or (
         f"output/triangle_single_instance/{args.train_index:05d}/{args.method}"))
     output.mkdir(parents=True, exist_ok=True)
@@ -329,10 +394,14 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "total_training_steps": len(result.losses),
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
+        "excitation_filter": "triangle_fir",
+        "initialization": "seeded_random_K_a"
+        if args.method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,
@@ -399,6 +468,8 @@ def main() -> None:
     parser.add_argument("--L-max", type=int, default=200)
     parser.add_argument("--A-min", type=int, default=1)
     parser.add_argument("--A-max", type=int, default=100)
+    parser.add_argument("--dp-min", type=int, default=1)
+    parser.add_argument("--dp-max", type=int, default=100)
     parser.add_argument("--initial-K", type=float, default=0.9)
     parser.add_argument("--initial-a", type=float, default=0.5)
     parser.add_argument("--initial-L", type=float, default=150.5)
@@ -408,7 +479,8 @@ def main() -> None:
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
-                        default="peak")
+                        default="none")
+    parser.add_argument("--print-frequency", type=int, default=1000)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")
@@ -431,6 +503,7 @@ def main() -> None:
             args.epochs,
             args.n_fft,
             args.refine_epochs,
+            args,
         )
         return
 

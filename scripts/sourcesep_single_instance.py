@@ -6,15 +6,15 @@ import numpy as np
 import torch
 from scipy.io import loadmat, wavfile
 from scipy.optimize import linear_sum_assignment
-from torch import fft, nn, optim
-from tqdm.auto import tqdm
+from torch import fft, nn
 
 from data.dataset import MatlabPluckData, MatlabTriangleData
 from data.helpers import file_processing
 from model.kps.objectives.frequency import loss_fn, to_log_mag
 from model.kps.pluck import KarplusStrongPluck
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
-from model.kps.training import TriangleFitConfig, fit_triangle
+from model.kps.training import (TriangleFitConfig, fit_filtered_reinforce,
+                                fit_triangle)
 from scripts.eval import listening
 
 
@@ -71,21 +71,6 @@ def _mean_delay_regularization(
     return torch.stack(penalties).mean()
 
 
-def _print_parameters(
-    label: str, indices: list[int], sources: nn.ModuleList
-) -> None:
-    for source_index, (dataset_index, model) in enumerate(
-        zip(indices, sources), start=1
-    ):
-        L, dp = model.selected_delays()
-        print(
-            f"{label} source {source_index} (index {dataset_index}): "
-            f"K={_scalar_value(model.scaled_gain()):.6f}, "
-            f"a={_scalar_value(model.scaled_allplus()):.6f}, "
-            f"L={L}, dp={dp}"
-        )
-
-
 def _report_source_recovery(
     indices: list[int],
     sources: nn.ModuleList,
@@ -93,7 +78,7 @@ def _report_source_recovery(
     target_waveforms: list[torch.Tensor],
     true_parameters: list[tuple[float, float, int, int]],
     selected_pairs: list[tuple[int, int]],
-) -> None:
+) -> list[dict]:
     """Match sources for reporting only; target stems never guide training."""
     with torch.no_grad():
         predictions = [
@@ -110,6 +95,7 @@ def _report_source_recovery(
             for prediction in predictions
         ])
     learned_rows, true_columns = linear_sum_assignment(costs.cpu().numpy())
+    matches = []
     for learned_row, true_column in zip(learned_rows, true_columns):
         model = sources[learned_row]
         K, a, L, dp = true_parameters[true_column]
@@ -123,6 +109,21 @@ def _report_source_recovery(
             f"a={_scalar_value(model.scaled_allplus()):.6f}, "
             f"L={learned_L}, dp={learned_dp}"
         )
+        truth = {"K": K, "a": a, "L": L, "dp": dp}
+        estimate = {
+            "K": _scalar_value(model.scaled_gain()),
+            "a": _scalar_value(model.scaled_allplus()),
+            "L": learned_L, "dp": learned_dp,
+        }
+        matches.append({
+            "estimate_slot": int(learned_row),
+            "target_index": indices[true_column],
+            "truth": truth, "estimate": estimate,
+            "absolute_error": {key: abs(estimate[key] - truth[key])
+                               for key in truth},
+            "waveform_rmse": rmse,
+        })
+    return matches
 
 
 def _train_triangle_sources(args: argparse.Namespace) -> None:
@@ -151,7 +152,8 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
     kwargs = dict(delay_len_min=args.L_min, delay_len_max=args.L_max,
                   A_min=args.A_min, A_max=args.A_max, n_fft=args.n_fft,
                   all_plus=True, all_plus_learnable=True,
-                  delay_gain_learnable=True, random_init=False,
+                  delay_gain_learnable=True,
+                  random_init=args.method == "reinforce",
                   delay_gain=args.initial_K, a=args.initial_a)
     if args.method == "relaxation":
         model_type = KarplusStrongTriangleRelaxation
@@ -165,6 +167,11 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         f"{args.epochs} fit + {args.refine_epochs} refinement epochs",
         flush=True,
     )
+    with torch.no_grad():
+        initial_mixture = torch.stack([
+            source.time_domain_synth(target.numel(), source.L_logits.new_ones(1))
+            for source in sources
+        ]).sum(0)
     config = TriangleFitConfig(
         method=args.method, epochs=args.epochs,
         refine_epochs=args.refine_epochs, n_fft=args.n_fft,
@@ -176,11 +183,12 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
-        spectrum_normalization=getattr(args, "spectrum_normalization", "peak"),
+        spectrum_normalization=getattr(args, "spectrum_normalization", "none"),
+        print_frequency=getattr(args, "print_frequency", 1000),
         exhaustive_cap=args.exhaustive_cap,
         show_progress=getattr(args, "show_progress", True),
     )
-    result = fit_triangle(sources, target, config)
+    result = fit_triangle(sources, target, config, indices)
     with torch.no_grad():
         predictions = [source.time_domain_synth(
             target.numel(), source.L_logits.new_ones(1), *pair)
@@ -205,6 +213,16 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                         "absolute_error": {key: abs(estimate[key] - truth[key])
                                            for key in estimate},
                         "waveform_rmse": float(costs[row, column] ** 0.5)})
+    for match in matches:
+        truth, estimate = match["truth"], match["estimate"]
+        print(
+            f"Matched learned source {match['estimate_slot'] + 1} to target index "
+            f"{match['target_index']} (RMSE={match['waveform_rmse']:.6g}): "
+            f"true K={truth['K']:.6f}, a={truth['a']:.6f}, "
+            f"L={int(truth['L'])}, A={int(truth['A'])}; "
+            f"learned K={estimate['K']:.6f}, a={estimate['a']:.6f}, "
+            f"L={estimate['L']}, A={estimate['A']}"
+        )
     error = target - mixture
     metrics = {
         "rmse": float(error.square().mean().sqrt()),
@@ -219,6 +237,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
     output = Path(args.output_dir or "output/sourcesep_triangle_single_instance")
     output.mkdir(parents=True, exist_ok=True)
     for name, audio in (("target_mixture", target),
+                        ("initial_mixture", initial_mixture),
                         ("estimated_mixture", mixture)):
         wavfile.write(output / f"{name}.wav", sample_rate,
                       audio.cpu().numpy().astype(np.float32))
@@ -236,6 +255,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         "reinforce_fit_domain": "circular_transfer_function"
         if args.method == "reinforce" else None,
         "refinement_domain": "finite_causal",
+        "excitation_filter": "triangle_fir",
+        "initialization": "seeded_random_K_a"
+        if args.method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,
@@ -277,6 +299,8 @@ def main() -> None:
     parser.add_argument("--L-max", type=int, default=200)
     parser.add_argument("--A-min", type=int, default=1)
     parser.add_argument("--A-max", type=int, default=100)
+    parser.add_argument("--dp-min", type=int, default=1)
+    parser.add_argument("--dp-max", type=int, default=100)
     parser.add_argument("--initial-K", type=float, default=0.9)
     parser.add_argument("--initial-a", type=float, default=0.5)
     parser.add_argument("--initial-L", type=float, default=150.5)
@@ -286,7 +310,8 @@ def main() -> None:
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
-                        default="peak")
+                        default="none")
+    parser.add_argument("--print-frequency", type=int, default=1000)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")
@@ -302,14 +327,7 @@ def main() -> None:
     seed = args.seed
     delay_epochs = args.epochs
     continuous_epochs = args.refine_epochs
-    print_frequency = 1_000
-    continuous_learning_rate = 1e-2
-    delay_learning_rate = 3e-3
     reinforce_samples = args.reinforce_samples
-    advantage_clip = 5.0
-    initial_uniform_prior_weight = 5e-2
-    final_uniform_prior_weight = 1e-3
-    ordinal_smoothness_weight = 1e-4
 
     directory = args.dataset_dir or "data/vary_all_pluck/"
     indices = args.indices
@@ -349,16 +367,6 @@ def main() -> None:
         (float(source[2]), float(source[3]), int(source[4]), int(source[5]))
         for source in source_examples
     ]
-    for source_index, (dataset_index, true_values) in enumerate(
-        zip(indices, true_parameters),
-        start=1,
-    ):
-        true_gain, true_a, true_L, true_dp = true_values
-        print(
-            f"True source {source_index} (index {dataset_index}): "
-            f"K={true_gain:.6f}, a={true_a:.6f}, L={true_L}, dp={true_dp}"
-        )
-
     sample_rates = {int(source[1]) for source in source_examples}
     if len(sample_rates) != 1:
         raise ValueError("The selected sources must have the same sample rate.")
@@ -381,184 +389,57 @@ def main() -> None:
         "delay_len_min": delay_len_min,
         "delay_len_max": delay_len_max,
         "n_fft": n_fft,
-        "dp_min": 1,
-        "dp_max": 100,
+        "dp_min": args.dp_min,
+        "dp_max": args.dp_max,
         "all_plus": True,
         "all_plus_learnable": True,
         "delay_gain_learnable": True,
+        "delay_gain": args.initial_K,
+        "a": args.initial_a,
         "random_init": True,
     }
     delay_sources = nn.ModuleList(
         KarplusStrongPluck(**delay_model_kwargs) for _ in indices
     )
-    phase1_continuous_parameters = [
-        parameter
-        for model in delay_sources
-        for name, parameter in model.named_parameters()
-        if name not in {"L_logits", "dp_logits"}
-    ]
-    joint_optimizer = optim.Adam([
-        {
-            "params": phase1_continuous_parameters,
-            "lr": continuous_learning_rate,
-        },
-        {
-            "params": [
-                parameter
-                for model in delay_sources
-                for parameter in (model.L_logits, model.dp_logits)
-            ],
-            "lr": delay_learning_rate,
-        },
-    ])
-    target_spectrum = fft.rfft(target_mixture[:n_fft], n=n_fft)
-    target_causal_spectrum = fft.rfft(target_mixture)
-
-    delay_sources.eval()
-    with torch.no_grad():
-        initial_mixture = _synthesize_mixture(
-            delay_sources,
-            unit_impulses,
-            target_mixture.numel(),
-        )
-
     output_directory = Path(args.output_dir or "output/sourcesep_pluck_single_instance")
     output_directory.mkdir(parents=True, exist_ok=True)
     sample_rate = sample_rates.pop()
-    listening.save_audio(
-        output_directory / "source_combined.wav",
-        target_mixture,
-        sample_rate,
+    delay_sources.eval()
+    with torch.no_grad():
+        initial_mixture = _synthesize_mixture(
+            delay_sources, unit_impulses, target_mixture.numel())
+    listening.save_audio(output_directory / "source_combined.wav",
+                         target_mixture, sample_rate)
+    listening.save_audio(output_directory / "initial_synthesis_combined.wav",
+                         initial_mixture, sample_rate)
+
+    config = TriangleFitConfig(
+        method="reinforce", epochs=delay_epochs,
+        refine_epochs=continuous_epochs, n_fft=n_fft,
+        reinforce_samples=reinforce_samples,
+        initial_uniform_prior_weight=args.initial_uniform_prior_weight,
+        final_uniform_prior_weight=args.final_uniform_prior_weight,
+        ordinal_smoothness_weight=args.ordinal_smoothness_weight,
+        advantage_clip=args.advantage_clip,
+        spectrum_normalization=args.spectrum_normalization,
+        print_frequency=args.print_frequency,
+        show_progress=args.show_progress,
     )
-    listening.save_audio(
-        output_directory / "initial_synthesis_combined.wav",
-        initial_mixture,
-        sample_rate,
-    )
-
-    _print_parameters("Initial", indices, delay_sources)
-
-    delay_sources.train()
-    epoch_bar = tqdm(range(delay_epochs), desc="Phase 1: L, dp, K, a")
-    for epoch_index in epoch_bar:
-        progress = epoch_index / max(delay_epochs - 1, 1)
-        prior_weight = (
-            initial_uniform_prior_weight
-            + progress
-            * (
-                final_uniform_prior_weight
-                - initial_uniform_prior_weight
-            )
-        )
-        joint_optimizer.zero_grad()
-        sampled_pairs = []
-        sampled_log_probabilities = []
-        for model in delay_sources:
-            pairs, log_probabilities = model.sample_delay_pairs(
-                reinforce_samples
-            )
-            sampled_pairs.append(pairs)
-            sampled_log_probabilities.append(log_probabilities)
-
-        reconstruction_losses = torch.stack([
-            loss_fn(
-                fft.rfft(
-                    _synthesize_mixture(
-                        delay_sources,
-                        unit_impulses,
-                        n_fft,
-                        [pairs[sample_index] for pairs in sampled_pairs],
-                    )
-                ),
-                target_spectrum,
-            )
-            for sample_index in range(reinforce_samples)
-        ])
-        reconstruction_loss = reconstruction_losses.mean()
-
-        detached_losses = reconstruction_losses.detach()
-        leave_one_out_baselines = (
-            detached_losses.sum() - detached_losses
-        ) / (reinforce_samples - 1)
-        advantages = detached_losses - leave_one_out_baselines
-        advantage_scale = advantages.std(unbiased=False).clamp_min(1e-6)
-        normalized_advantages = torch.clamp(
-            advantages / advantage_scale,
-            min=-advantage_clip,
-            max=advantage_clip,
-        )
-        joint_log_probabilities = torch.stack(
-            sampled_log_probabilities
-        ).sum(dim=0)
-        reinforce_loss = torch.mean(
-            normalized_advantages * joint_log_probabilities
-        )
-        delay_regularization = _mean_delay_regularization(
-            delay_sources,
-            prior_weight,
-            ordinal_smoothness_weight,
-        )
-        loss = reconstruction_loss + reinforce_loss + delay_regularization
-        loss.backward()
-        joint_optimizer.step()
-        if (epoch_index + 1) % print_frequency == 0:
-            epoch_bar.set_postfix(
-                loss=f"{float(reconstruction_loss.detach().item()):.6f}",
-                delays=",".join(
-                    f"{model.scaled_delay_len()}/{model.scaled_dp()}"
-                    for model in delay_sources
-                ),
-            )
-
-    selected_pairs = [model.selected_delays() for model in delay_sources]
-    _print_parameters("Phase 1", indices, delay_sources)
-
     sources = delay_sources
-    for model in sources:
-        model.L_logits.requires_grad_(False)
-        model.dp_logits.requires_grad_(False)
-    del joint_optimizer
-    phase2_continuous_parameters = [
-        parameter
-        for model in sources
-        for name, parameter in model.named_parameters()
-        if name not in {"L_logits", "dp_logits"}
-    ]
-    continuous_optimizer = optim.Adam(
-        phase2_continuous_parameters,
-        lr=continuous_learning_rate,
-    )
-
-    _print_parameters("Phase 2 initial", indices, sources)
-
-    sources.train()
-    epoch_bar = tqdm(
-        range(continuous_epochs),
-        desc="Phase 2: causal K, a",
-    )
-    for epoch_index in epoch_bar:
-        continuous_optimizer.zero_grad()
-        prediction_mixture = _synthesize_mixture(
-            sources,
-            unit_impulses,
-            target_mixture.numel(),
-            selected_pairs,
+    result = fit_filtered_reinforce(
+        sources, target_mixture, config, "dp", indices)
+    selected_pairs = result.pairs
+    for source_index, (dataset_index, true_values) in enumerate(
+        zip(indices, true_parameters), start=1):
+        true_gain, true_a, true_L, true_dp = true_values
+        print(
+            f"True source {source_index} (index {dataset_index}): "
+            f"K={true_gain:.6f}, a={true_a:.6f}, "
+            f"L={true_L}, dp={true_dp}"
         )
-        reconstruction_loss = loss_fn(
-            fft.rfft(prediction_mixture),
-            target_causal_spectrum,
-        )
-        reconstruction_loss.backward()
-        continuous_optimizer.step()
-        if (epoch_index + 1) % print_frequency == 0:
-            epoch_bar.set_postfix(
-                loss=f"{float(reconstruction_loss.detach().item()):.6f}"
-            )
-
-    _print_parameters("Learned", indices, sources)
 
     sources.eval()
-    _report_source_recovery(
+    matches = _report_source_recovery(
         indices,
         sources,
         unit_impulses,
@@ -580,6 +461,45 @@ def main() -> None:
         / mixture_error.clamp_min(torch.finfo(mixture_error.dtype).tiny)
     )
     print(f"Learned mixture SNR={mixture_snr.item():.2f} dB")
+    metrics = {
+        "rmse": float((target_mixture - learned_mixture).square().mean().sqrt()),
+        "snr_db": float(mixture_snr),
+        "spectral_loss": float(loss_fn(fft.rfft(learned_mixture),
+                                        fft.rfft(target_mixture))),
+        "absolute_spectral_loss": float((
+            to_log_mag(fft.rfft(learned_mixture), rel_to_max=False)
+            - to_log_mag(fft.rfft(target_mixture), rel_to_max=False)
+        ).abs().mean()),
+    }
+    report = {
+        "method": "reinforce", "seed": seed, "indices": indices,
+        "source_count_assumed": len(indices),
+        "candidate_bounds": {"L": [args.L_min, args.L_max],
+                             "dp": [args.dp_min, args.dp_max]},
+        "n_fft": n_fft, "epochs": delay_epochs,
+        "refine_epochs": continuous_epochs,
+        "spectrum_normalization": config.spectrum_normalization,
+        "reinforce_fit_domain": "circular_transfer_function",
+        "refinement_domain": "finite_causal",
+        "excitation_filter": "two_tap_comb",
+        "initialization": "seeded_random_K_a",
+        "reinforce_stability": {
+            "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
+            "final_uniform_prior_weight": config.final_uniform_prior_weight,
+            "ordinal_smoothness_weight": config.ordinal_smoothness_weight,
+            "advantage_clip": config.advantage_clip,
+        },
+        "selected_pairs": selected_pairs,
+        "causal_metrics": metrics,
+        "matched_sources": matches,
+    }
+    (output_directory / "summary.json").write_text(
+        json.dumps(report, indent=2) + "\n")
+    np.savez_compressed(output_directory / "trajectory.npz",
+                        loss=np.asarray(result.losses),
+                        pairs=np.asarray(result.trajectory),
+                        K=np.asarray(result.gain_trajectory),
+                        a=np.asarray(result.allpass_trajectory))
     listening.save_audio(
         output_directory / "learned_synthesis_combined.wav",
         learned_mixture,
