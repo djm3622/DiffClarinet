@@ -848,7 +848,7 @@ class TriangleFitConfig:
     discrete_lr: float = 3e-3
     initial_uniform_prior_weight: float = 5e-2
     final_uniform_prior_weight: float = 1e-3
-    prior_anneal_epochs: int = 5_000
+    prior_anneal_epochs: int = 20_000
     ordinal_smoothness_weight: float = 1e-4
     advantage_clip: float = 5.0
     spectrum_normalization: str = "none"

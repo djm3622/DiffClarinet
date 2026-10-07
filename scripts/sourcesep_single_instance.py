@@ -180,7 +180,7 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
             args, "initial_uniform_prior_weight", 5e-2),
         final_uniform_prior_weight=getattr(
             args, "final_uniform_prior_weight", 1e-3),
-        prior_anneal_epochs=getattr(args, "prior_anneal_epochs", 5_000),
+        prior_anneal_epochs=getattr(args, "prior_anneal_epochs", 20_000),
         ordinal_smoothness_weight=getattr(
             args, "ordinal_smoothness_weight", 1e-4),
         advantage_clip=getattr(args, "advantage_clip", 5.0),
@@ -309,7 +309,7 @@ def main() -> None:
     parser.add_argument("--reinforce-samples", type=int, default=8)
     parser.add_argument("--initial-uniform-prior-weight", type=float, default=5e-2)
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
-    parser.add_argument("--prior-anneal-epochs", type=int, default=5_000)
+    parser.add_argument("--prior-anneal-epochs", type=int, default=20_000)
     parser.add_argument("--ordinal-smoothness-weight", type=float, default=1e-4)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
