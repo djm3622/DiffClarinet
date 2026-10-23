@@ -1,3 +1,9 @@
+"""Base differentiable Karplus--Strong synthesizer with an integer delay length.
+
+Learns the loop gain K and all-pass coefficient a directly, and provides both
+the circular frequency response and finite causal time-domain synthesis."""
+
+
 import torch
 import torchaudio
 from torch import nn
@@ -10,6 +16,7 @@ class KarplusStrongFixed(nn.Module):
         self, delay_len, n_fft=2048, rescale=False, all_plus=True,
         all_plus_learnable=True, delay_gain_learnable=False,
         delay_gain=0.99991, a=0.1, random_init=True,
+        gain_min: float = 0.0, gain_max: float = 1.0,
     ):
         super().__init__()
         if delay_len < 1:
@@ -18,6 +25,12 @@ class KarplusStrongFixed(nn.Module):
         self.all_plus = all_plus
         self.rescale = rescale
         self.delay_len = int(delay_len)
+        if not 0 <= gain_min < gain_max <= 1:
+            raise ValueError("Gain bounds must satisfy 0 <= gain_min < gain_max <= 1.")
+        if rescale and (gain_min, gain_max) != (0.0, 1.0):
+            raise ValueError("Use either rescale or explicit gain bounds.")
+        self.gain_min = float(gain_min)
+        self.gain_max = float(gain_max)
 
         self.all_plus_learnable = all_plus_learnable
         self.delay_gain_learnable = delay_gain_learnable
@@ -35,11 +48,16 @@ class KarplusStrongFixed(nn.Module):
                     (), dtype=torch.get_default_dtype()
                 ).clamp_(1e-6, 1.0 - 1e-6)
             else:
+                if not gain_min < delay_gain < gain_max:
+                    raise ValueError("Initial gain must be strictly inside its bounds.")
                 gain_tensor = torch.tensor(
-                    delay_gain, dtype=torch.get_default_dtype()
+                    (delay_gain - gain_min) / (gain_max - gain_min),
+                    dtype=torch.get_default_dtype()
                 )
             self.delay_gain = nn.Parameter(torch.logit(gain_tensor))
         else:
+            if (gain_min, gain_max) != (0.0, 1.0) and not gain_min < delay_gain < gain_max:
+                raise ValueError("Fixed gain must be strictly inside its bounds.")
             self.delay_gain = delay_gain
 
         if self.all_plus_learnable:
@@ -57,7 +75,16 @@ class KarplusStrongFixed(nn.Module):
         if self.delay_gain_learnable:
             if self.rescale:
                 return torch.sigmoid(self.delay_gain) * 0.1 + 0.9 # for to be positive, then scale. this init value is 0.95
-            return torch.sigmoid(self.delay_gain)
+            unit_gain = torch.sigmoid(self.delay_gain)
+            if (self.gain_min, self.gain_max) == (0.0, 1.0):
+                return unit_gain
+            gain = self.gain_min + (self.gain_max - self.gain_min) * unit_gain
+            lower = gain.new_tensor(self.gain_min)
+            upper = gain.new_tensor(self.gain_max)
+            # Sigmoid can round to an endpoint at extreme logits; keep the
+            # physical gain strictly within the requested open interval.
+            return gain.clamp(min=torch.nextafter(lower, upper),
+                              max=torch.nextafter(upper, lower))
         return self.delay_gain
 
     def scaled_allplus(self):

@@ -1,3 +1,6 @@
+"""Uniform random noise excitations for Karplus--Strong training."""
+
+
 import torch
 
 

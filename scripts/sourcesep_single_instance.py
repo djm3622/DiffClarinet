@@ -1,4 +1,11 @@
+"""Fit a mixture of comb or triangle Karplus--Strong sources to their summed audio.
+
+Sources are fitted from the mixture only; evaluation matches estimated stems to
+target stems by permutation before reporting source and parameter recovery."""
+
+
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -11,9 +18,9 @@ from torch import fft, nn
 from data.dataset import MatlabPluckData, MatlabTriangleData
 from data.helpers import file_processing
 from model.kps.objectives.frequency import loss_fn, to_log_mag
-from model.kps.pluck import KarplusStrongPluck
+from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
-from model.kps.training import (TriangleFitConfig, fit_filtered_reinforce,
+from model.kps.training import (TriangleFitConfig, fit_filtered,
                                 fit_triangle)
 from scripts.eval import listening
 
@@ -157,7 +164,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                   delay_gain=args.initial_K, a=args.initial_a)
     if args.method == "relaxation":
         model_type = KarplusStrongTriangleRelaxation
-        kwargs["delay_len_init"] = args.initial_L
+        kwargs["delay_len_init"] = (args.initial_L if getattr(
+            args, "relaxation_initialization", "configured") == "configured" else None)
+        kwargs["position_init"] = getattr(args, "initial_position", None)
     else:
         model_type = KarplusStrongTriangle
     sources = nn.ModuleList(model_type(**kwargs) for _ in indices)
@@ -187,6 +196,10 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
         spectrum_normalization=getattr(args, "spectrum_normalization", "none"),
         print_frequency=getattr(args, "print_frequency", 1000),
         exhaustive_cap=args.exhaustive_cap,
+        gumbel_temperature=getattr(args, "gumbel_temperature_start", 1.0),
+        gumbel_temperature_end=getattr(args, "gumbel_temperature_end", 0.1),
+        continuous_lr=getattr(args, "continuous_lr", 1e-2),
+        discrete_lr=getattr(args, "discrete_lr", 3e-3),
         show_progress=getattr(args, "show_progress", True),
     )
     result = fit_triangle(sources, target, config, indices)
@@ -235,7 +248,8 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
             - to_log_mag(fft.rfft(target), rel_to_max=False)
         ).abs().mean()),
     }
-    output = Path(args.output_dir or "output/sourcesep_triangle_single_instance")
+    output = Path(args.output_dir or
+                  f"output/sourcesep_triangle_single_instance/{args.method}")
     output.mkdir(parents=True, exist_ok=True)
     for name, audio in (("target_mixture", target),
                         ("initial_mixture", initial_mixture),
@@ -252,11 +266,14 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                              "A": [args.A_min, args.A_max]},
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
+        "fit_config": asdict(config),
+        "fit_domain": "finite_causal",
+        "backward_surrogate": "circular_transfer_function"
+        if args.method in {"gumbel", "relaxation"} else None,
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "finite_causal"
         if args.method == "reinforce" else None,
-        "phase1_target": "first_n_fft_causal_samples"
-        if args.method == "reinforce" else None,
+        "phase1_target": "first_n_fft_causal_samples",
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
         "initialization": "seeded_random_L_A_K_a"
@@ -279,7 +296,9 @@ def _train_triangle_sources(args: argparse.Namespace) -> None:
                         loss=np.asarray(result.losses),
                         pairs=np.asarray(result.trajectory),
                         K=np.asarray(result.gain_trajectory),
-                        a=np.asarray(result.allpass_trajectory))
+                        a=np.asarray(result.allpass_trajectory),
+                        continuous_L=np.asarray(result.continuous_delay_trajectory),
+                        continuous_position=np.asarray(result.continuous_position_trajectory))
 
 
 def main() -> None:
@@ -306,6 +325,10 @@ def main() -> None:
     parser.add_argument("--initial-K", type=float, default=0.9)
     parser.add_argument("--initial-a", type=float, default=0.5)
     parser.add_argument("--initial-L", type=float, default=150.5)
+    parser.add_argument("--relaxation-initialization", choices=("random", "configured"),
+                        default="random", help="Seeded random delays or explicit initial values")
+    parser.add_argument("--initial-position", type=float, default=None,
+                        help="Continuous dp/A initialization; default: valid range midpoint")
     parser.add_argument("--reinforce-samples", type=int, default=8)
     parser.add_argument("--initial-uniform-prior-weight", type=float, default=5e-2)
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
@@ -315,6 +338,10 @@ def main() -> None:
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
                         default="none")
     parser.add_argument("--print-frequency", type=int, default=1000)
+    parser.add_argument("--gumbel-temperature-start", type=float, default=1.0)
+    parser.add_argument("--gumbel-temperature-end", type=float, default=0.1)
+    parser.add_argument("--continuous-lr", type=float, default=1e-2)
+    parser.add_argument("--discrete-lr", type=float, default=3e-3)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")
@@ -324,8 +351,8 @@ def main() -> None:
     if args.data_mode == "triangle":
         _train_triangle_sources(args)
         return
-    if args.method != "reinforce":
-        raise ValueError("Existing pluck source separation supports reinforce only.")
+    if args.method == "causal":
+        raise ValueError("Pluck mixture refinement requires audio-derived pairs.")
 
     seed = args.seed
     delay_epochs = args.epochs
@@ -335,7 +362,7 @@ def main() -> None:
     directory = args.dataset_dir or "data/vary_all_pluck/"
     indices = args.indices
 
-    if reinforce_samples < 2:
+    if args.method == "reinforce" and reinforce_samples < 2:
         raise ValueError(
             "Leave-one-out REINFORCE requires at least two samples."
         )
@@ -399,12 +426,17 @@ def main() -> None:
         "delay_gain_learnable": True,
         "delay_gain": args.initial_K,
         "a": args.initial_a,
-        "random_init": True,
+        "random_init": args.method == "reinforce",
     }
-    delay_sources = nn.ModuleList(
-        KarplusStrongPluck(**delay_model_kwargs) for _ in indices
-    )
-    output_directory = Path(args.output_dir or "output/sourcesep_pluck_single_instance")
+    model_type = KarplusStrongPluck
+    if args.method == "relaxation":
+        model_type = KarplusStrongPluckRelaxation
+        delay_model_kwargs["delay_len_init"] = (args.initial_L if getattr(
+            args, "relaxation_initialization", "configured") == "configured" else None)
+        delay_model_kwargs["position_init"] = getattr(args, "initial_position", None)
+    delay_sources = nn.ModuleList(model_type(**delay_model_kwargs) for _ in indices)
+    output_directory = Path(args.output_dir or
+                            f"output/sourcesep_pluck_single_instance/{args.method}")
     output_directory.mkdir(parents=True, exist_ok=True)
     sample_rate = sample_rates.pop()
     delay_sources.eval()
@@ -417,7 +449,7 @@ def main() -> None:
                          initial_mixture, sample_rate)
 
     config = TriangleFitConfig(
-        method="reinforce", epochs=delay_epochs,
+        method=args.method, epochs=delay_epochs,
         refine_epochs=continuous_epochs, n_fft=n_fft,
         reinforce_samples=reinforce_samples,
         initial_uniform_prior_weight=args.initial_uniform_prior_weight,
@@ -428,9 +460,14 @@ def main() -> None:
         spectrum_normalization=args.spectrum_normalization,
         print_frequency=args.print_frequency,
         show_progress=args.show_progress,
+        exhaustive_cap=args.exhaustive_cap,
+        gumbel_temperature=args.gumbel_temperature_start,
+        gumbel_temperature_end=args.gumbel_temperature_end,
+        continuous_lr=args.continuous_lr,
+        discrete_lr=args.discrete_lr,
     )
     sources = delay_sources
-    result = fit_filtered_reinforce(
+    result = fit_filtered(
         sources, target_mixture, config, "dp", indices)
     selected_pairs = result.pairs
     for source_index, (dataset_index, true_values) in enumerate(
@@ -476,25 +513,32 @@ def main() -> None:
         ).abs().mean()),
     }
     report = {
-        "method": "reinforce", "seed": seed, "indices": indices,
+        "method": args.method, "seed": seed, "indices": indices,
         "source_count_assumed": len(indices),
         "candidate_bounds": {"L": [args.L_min, args.L_max],
                              "dp": [args.dp_min, args.dp_max]},
         "n_fft": n_fft, "epochs": delay_epochs,
         "refine_epochs": continuous_epochs,
+        "fit_config": asdict(config),
+        "fit_domain": "finite_causal",
+        "backward_surrogate": "circular_transfer_function"
+        if args.method in {"gumbel", "relaxation"} else None,
         "spectrum_normalization": config.spectrum_normalization,
-        "reinforce_fit_domain": "finite_causal",
+        "reinforce_fit_domain": "finite_causal"
+        if args.method == "reinforce" else None,
         "phase1_target": "first_n_fft_causal_samples",
         "refinement_domain": "finite_causal",
         "excitation_filter": "two_tap_comb",
-        "initialization": "seeded_random_L_dp_K_a",
+        "initialization": "seeded_random_L_dp_K_a"
+        if args.method == "reinforce" else "configured",
         "reinforce_stability": {
             "initial_uniform_prior_weight": config.initial_uniform_prior_weight,
             "final_uniform_prior_weight": config.final_uniform_prior_weight,
             "prior_anneal_epochs": config.prior_anneal_epochs,
             "ordinal_smoothness_weight": config.ordinal_smoothness_weight,
             "advantage_clip": config.advantage_clip,
-        },
+        } if args.method == "reinforce" else None,
+        "search_evaluations": result.search_evaluations,
         "selected_pairs": selected_pairs,
         "causal_metrics": metrics,
         "matched_sources": matches,
@@ -505,7 +549,9 @@ def main() -> None:
                         loss=np.asarray(result.losses),
                         pairs=np.asarray(result.trajectory),
                         K=np.asarray(result.gain_trajectory),
-                        a=np.asarray(result.allpass_trajectory))
+                        a=np.asarray(result.allpass_trajectory),
+                        continuous_L=np.asarray(result.continuous_delay_trajectory),
+                        continuous_position=np.asarray(result.continuous_position_trajectory))
     listening.save_audio(
         output_directory / "learned_synthesis_combined.wav",
         learned_mixture,

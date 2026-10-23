@@ -1,3 +1,7 @@
+"""Karplus--Strong model whose loop gain and all-pass coefficient are predicted
+from the target audio by a CNN encoder, for training across many instances."""
+
+
 import torch
 import torchaudio
 from torch import nn

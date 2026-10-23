@@ -1,3 +1,9 @@
+"""Filename parsing and directory listing helpers for the MATLAB datasets.
+
+Parameter labels (L, dp, K, a, seed) are read from underscore-separated fields
+in each file's name."""
+
+
 import os
 
 

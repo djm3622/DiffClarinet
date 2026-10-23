@@ -1,3 +1,6 @@
+"""Save waveforms to WAV files for listening."""
+
+
 from pathlib import Path
 
 import numpy as np

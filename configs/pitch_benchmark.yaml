@@ -1,0 +1,24 @@
+# Same source draws and observation window as the main K05 DDSP study.
+reference_config: configs/delay_benchmark_bluehive_k05.yaml
+output_dir: output/pitch_benchmark
+methods: [klapuri, autocorrelation]
+source_counts: [1, 2, 3, 4, 5, 6, 7]
+instances: 32
+selection_seed: 1729
+samples: 8192
+frame_size: 8192
+hop_size: 512
+bin_cents: 10.0
+separation_cents: 30.0
+thresholds_cents: [25, 50]
+# Each variant keeps its own identity and its configured seed budget.
+variants:
+  main:
+    root: /scratch/dmillard/DiffClarinet/benchmark_20261016_k05
+    config: configs/delay_benchmark_bluehive_k05.yaml
+  relaxation_pair_random:
+    root: /scratch/dmillard/DiffClarinet/benchmark_20261016_relaxation_pair_random
+    config: configs/delay_benchmark_relaxation_pair_random.yaml
+  gumbel_sampled:
+    root: /scratch/dmillard/DiffClarinet/benchmark_20261018_gumbel_sampled
+    config: configs/delay_benchmark_gumbel_sampled.yaml

@@ -1,3 +1,7 @@
+"""Train the adaptive Karplus--Strong model to predict loop gain across many
+instances, with in- or out-of-distribution train/validation splits."""
+
+
 from model.kps.dkps_adaptive import KarplusStrongAdaptive
 from model.kps.dkps_fixed import KarplusStrongFixed
 from model.kps.objectives.frequency import to_log_mag, loss_fn, stft_loss, multi_scale_loss

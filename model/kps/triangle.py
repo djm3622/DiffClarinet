@@ -5,6 +5,7 @@ import torchaudio
 from torch import nn
 
 from .dkps_fixed import KarplusStrongFixed
+from .relaxation_pair import ContinuousDelayPairMixin
 
 
 def triangle(n_samples: int, L: int | torch.Tensor,
@@ -150,28 +151,10 @@ class KarplusStrongTriangle(KarplusStrongFixed):
                                       pair[1] if A is None else A)
 
 
-class KarplusStrongTriangleRelaxation(KarplusStrongTriangle):
-    """Continuous spectral L, categorical valid A; causal output floors L."""
+class KarplusStrongTriangleRelaxation(ContinuousDelayPairMixin, KarplusStrongTriangle):
+    """Continuous L and A; causal synthesis floors both delays."""
 
-    def __init__(self, *args, delay_len_init: float, **kwargs) -> None:
+    def __init__(self, *args, delay_len_init: float | None = None,
+                 position_init: float | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if not float(self.L_candidates[0]) <= delay_len_init <= float(self.L_candidates[-1]):
-            raise ValueError("Continuous L initialization outside candidate bounds.")
-        self.L_logits.requires_grad_(False)
-        self.delay_len_parameter = nn.Parameter(torch.tensor(delay_len_init))
-        if int(self.A_candidates[0]) >= int(delay_len_init):
-            raise ValueError("Initial continuous L has no valid A candidate.")
-
-    def continuous_L(self) -> torch.Tensor:
-        return self.delay_len_parameter.clamp(float(self.L_candidates[0]),
-                                               float(self.L_candidates[-1]))
-
-    def A_distribution(self) -> torch.distributions.Categorical:
-        bound = int(self.continuous_L().detach().floor())
-        logits = self.A_logits.masked_fill(self.A_candidates >= bound, -torch.inf)
-        return torch.distributions.Categorical(logits=logits)
-
-    def selected_delays(self) -> tuple[int, int]:
-        L = int(self.continuous_L().detach().floor())
-        A = int(self.A_candidates[self.A_distribution().logits.argmax()])
-        return L, A
+        self._init_continuous_pair(delay_len_init, position_init, "A")

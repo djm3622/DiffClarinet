@@ -1,3 +1,11 @@
+"""Fitting loops for the Karplus--Strong models.
+
+Covers the original noise-excitation delay estimators and the two-phase
+unit-impulse fitter for comb and triangle filters: phase one selects integer
+delays (REINFORCE, Gumbel--Softmax, relaxation, exhaustive, or pitch), and
+phase two freezes the delays and refines K and a against causal audio."""
+
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import product
@@ -285,101 +293,31 @@ def train_pluck_relaxation(
     dataloader: DataLoader,
     config: TrainingConfig,
 ) -> TrainingResult:
-    """Fit continuous L and categorical dp with REINFORCE for dp."""
-    if config.reinforce_samples < 2:
-        raise ValueError("Leave-one-out REINFORCE needs two samples.")
+    """Fit continuous L and dp through a circular backward surrogate."""
     result = _new_result(model)
-    optimizer = optim.Adam([
-        {
-            "params": [model.delay_len_parameter],
-            "lr": config.continuous_learning_rate,
-        },
-        {
-            "params": [model.dp_logits],
-            "lr": config.delay_learning_rate,
-        },
-        {
-            "params": [
-                parameter for name, parameter in model.named_parameters()
-                if parameter.requires_grad
-                and name not in {"delay_len_parameter", "dp_logits"}
-            ],
-            "lr": config.continuous_learning_rate,
-        },
-    ])
+    optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
+                           lr=config.continuous_learning_rate)
     model.train()
     for epoch_index in range(config.epochs):
-        prior_weight = _uniform_prior_weight(epoch_index, config)
         for elements in dataloader:
             target_wave = elements[0].squeeze(0)[..., 1:1 + config.n_fft]
             unit_impulse = elements[-1].squeeze(0)
             if target_wave.numel() != config.n_fft:
                 raise ValueError("Target is shorter than the training window.")
-            target = fft.rfft(target_wave)
-            distribution = model.dp_distribution()
-            indices = distribution.sample((config.reinforce_samples,))
-            delays = model.dp_candidates[indices]
-            log_probabilities = distribution.log_prob(indices)
-
             optimizer.zero_grad()
-            continuous_L = model.scaled_delay_len()
-            hard_L = int(continuous_L.detach().floor().item())
-            K = model.scaled_gain()
-            a = model.scaled_allplus()
-            detached_K = K.detach() if isinstance(K, torch.Tensor) else K
-            detached_a = a.detach() if isinstance(a, torch.Tensor) else a
-            reconstruction_losses = []
-            for dp in delays:
-                integer_dp = int(dp)
-                causal = fft.rfft(model.time_domain_synth(
-                    config.n_fft, unit_impulse, hard_L, integer_dp
-                ))
-                surrogate = model.spectral_response(
-                    unit_impulse,
-                    continuous_L,
-                    integer_dp,
-                    delay_gain=detached_K,
-                    allpass=detached_a,
-                )
-                prediction = causal + surrogate - surrogate.detach()
-                reconstruction_losses.append(loss_fn(prediction, target))
-            reconstruction_losses = torch.stack(reconstruction_losses)
-            reconstruction_loss = reconstruction_losses.mean()
-            detached = reconstruction_losses.detach()
-            advantages = detached - (
-                detached.sum() - detached
-            ) / (config.reinforce_samples - 1)
-            scale = advantages.std(unbiased=False).clamp_min(1e-6)
-            reinforce_loss = torch.mean(
-                torch.clamp(
-                    advantages / scale,
-                    -config.advantage_clip,
-                    config.advantage_clip,
-                ) * log_probabilities
-            )
-            probabilities = distribution.probs
-            valid_dp_count = int(torch.isfinite(distribution.logits).sum())
-            prior_kl = torch.sum(
-                probabilities * (
-                    torch.log(probabilities.clamp_min(1e-12))
-                    + torch.log(probabilities.new_tensor(
-                        float(valid_dp_count)
-                    ))
-                )
-            )
-            loss = (
-                reconstruction_loss + reinforce_loss
-                + prior_weight * prior_kl
-                + config.ordinal_smoothness_weight
-                * model.dp_logits.diff().square().mean()
-            )
-            loss.backward()
-            optimizer.step()
-            with torch.no_grad():
-                model.delay_len_parameter.clamp_(
-                    float(model.L_candidates[0]),
-                    float(model.L_candidates[-1]),
-                )
+            causal = fft.rfft(model.time_domain_synth(
+                config.n_fft, unit_impulse, *model.selected_delays()))
+            K, a = model.scaled_gain(), model.scaled_allplus()
+            surrogate = model.spectral_response(
+                unit_impulse, model.continuous_L(), model.continuous_position(),
+                delay_gain=K.detach() if isinstance(K, torch.Tensor) else K,
+                allpass=a.detach() if isinstance(a, torch.Tensor) else a)
+            reconstruction_loss = loss_fn(
+                causal + (surrogate - surrogate.detach()), fft.rfft(target_wave))
+            reconstruction_loss.backward()
+            _checked_filtered_step(optimizer, nn.ModuleList([model]),
+                                   "pluck relaxation", epoch_index)
+            model.project_delays_()
             _record_step(result, model, reconstruction_loss)
             _print_epoch(epoch_index, config, reconstruction_loss)
     return result
@@ -854,6 +792,7 @@ class TriangleFitConfig:
     spectrum_normalization: str = "none"
     print_frequency: int = 1000
     gumbel_temperature: float = 1.0
+    gumbel_temperature_end: float = 0.1
     exhaustive_cap: int = 10000
     show_progress: bool = False
 
@@ -868,10 +807,13 @@ class TriangleFitConfig:
             raise ValueError("Prior anneal epochs must be positive.")
         if min(self.epochs, self.refine_epochs) < 0 or self.n_fft < 1:
             raise ValueError("Invalid training budget or FFT length.")
-        if self.method in {"reinforce", "relaxation"} and self.reinforce_samples < 2:
+        if self.method == "reinforce" and self.reinforce_samples < 2:
             raise ValueError("Leave-one-out baseline needs at least two samples.")
-        if self.gumbel_temperature <= 0 or self.exhaustive_cap < 1:
+        if (self.gumbel_temperature <= 0 or self.gumbel_temperature_end <= 0
+                or self.exhaustive_cap < 1):
             raise ValueError("Invalid temperature or enumeration cap.")
+        if self.continuous_lr <= 0 or self.discrete_lr <= 0:
+            raise ValueError("Learning rates must be positive.")
         if (self.initial_uniform_prior_weight < 0
                 or self.final_uniform_prior_weight < 0
                 or self.ordinal_smoothness_weight < 0
@@ -888,6 +830,8 @@ class TriangleFitResult:
     allpass_trajectory: list[list[float]] = field(default_factory=list)
     search_evaluations: int = 0
     estimated_periods: list[int] = field(default_factory=list)
+    continuous_delay_trajectory: list[list[float]] = field(default_factory=list)
+    continuous_position_trajectory: list[list[float]] = field(default_factory=list)
 
 
 def _synth(models: nn.ModuleList, n: int,
@@ -920,6 +864,14 @@ def _record_triangle_step(result: TriangleFitResult,
                           pairs: list[tuple[int, int]]) -> None:
     result.losses.append(float(loss.detach()))
     result.trajectory.append(list(pairs))
+    result.continuous_delay_trajectory.append([
+        float(model.continuous_L().detach()) if hasattr(model, "continuous_L")
+        else float(pair[0]) for model, pair in zip(models, pairs)
+    ])
+    result.continuous_position_trajectory.append([
+        float(model.continuous_position().detach()) if hasattr(model, "continuous_position")
+        else float(pair[1]) for model, pair in zip(models, pairs)
+    ])
     result.gain_trajectory.append([
         float(model.scaled_gain().detach()) for model in models
     ])
@@ -940,6 +892,18 @@ def _print_filtered_parameters(models: nn.ModuleList, position: str,
             f"K={float(model.scaled_gain().detach()):.6f}, "
             f"a={float(model.scaled_allplus().detach()):.6f}"
         )
+
+
+def _checked_filtered_step(optimizer: torch.optim.Optimizer,
+                           models: nn.ModuleList, phase: str,
+                           epoch_index: int) -> None:
+    """Reject invalid derivatives before they corrupt optimizer/model state."""
+    for name, parameter in models.named_parameters():
+        if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+            raise FloatingPointError(
+                f"{phase}: nonfinite gradient for {name} at update {epoch_index + 1}; "
+                "optimizer update rejected.")
+    optimizer.step()
 
 
 def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
@@ -1005,7 +969,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         if not torch.isfinite(objective):
             raise FloatingPointError("Nonfinite filtered REINFORCE objective.")
         objective.backward()
-        optimizer.step()
+        _checked_filtered_step(optimizer, models, "REINFORCE phase 1", epoch_index)
         _record_triangle_step(result, models, losses.mean(),
                               [model.selected_delays() for model in models])
         if config.show_progress and (epoch_index + 1) % config.print_frequency == 0:
@@ -1030,7 +994,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
-            optimizer.step()
+            _checked_filtered_step(optimizer, models, "REINFORCE phase 2", epoch_index)
             _record_triangle_step(result, models, measured, result.pairs)
             if config.show_progress and (epoch_index + 1) % config.print_frequency == 0:
                 phase_two.set_postfix(loss=f"{result.losses[-1]:.4f}")
@@ -1110,12 +1074,27 @@ def _continuous_parameters(models: nn.ModuleList) -> list[nn.Parameter]:
             if parameter.requires_grad and name in {"delay_gain", "a"}]
 
 
-def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
+def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                  config: TriangleFitConfig,
+                 position: str,
                  indices: list[int] | None = None) -> TriangleFitResult:
-    """Fit from the mixture; REINFORCE uses causal synthesis in both phases."""
+    """Fit comb or triangle sources from audio using a shared causal objective.
+
+    Gumbel and continuous delay pairs use circular derivatives as backward surrogates.
+    Exhaustive search scores every joint pair assignment at the current K/a,
+    then refines K/a only for the winning assignment.
+    """
+    if position not in {"A", "dp"}:
+        raise ValueError("Expected triangle A or comb dp.")
+    expected_type = KarplusStrongTriangle if position == "A" else KarplusStrongPluck
+    if not all(isinstance(model, expected_type) for model in models):
+        raise TypeError("Model types must match the excitation position.")
+    relaxation_types = (KarplusStrongTriangleRelaxation, KarplusStrongPluckRelaxation)
+    if config.method != "relaxation" and any(
+            isinstance(model, relaxation_types) for model in models):
+        raise TypeError("Relaxation models require the relaxation fitting method.")
     if config.method == "reinforce":
-        return fit_filtered_reinforce(models, target, config, "A", indices)
+        return fit_filtered_reinforce(models, target, config, position, indices)
     if not models or target.ndim != 1 or target.numel() < config.n_fft:
         raise ValueError("Expected nonempty models and a one-dimensional long target.")
     if any(model.n_fft != config.n_fft for model in models):
@@ -1125,6 +1104,11 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
     if any(model.L_logits.device != target.device or
            model.L_logits.dtype != target.dtype for model in models):
         raise ValueError("Target, models, and unit impulses must share device and dtype.")
+    if indices is not None and len(indices) != len(models):
+        raise ValueError("Each source must have one display index.")
+    models.train()
+    second_name = "A_logits" if position == "A" else "dp_logits"
+    candidate_name = "A_candidates" if position == "A" else "dp_candidates"
     target = target[:config.n_fft]
     target_spectrum = torch.fft.rfft(target)
     result = TriangleFitResult(pairs=[])
@@ -1148,36 +1132,45 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
     else:
         continuous = _continuous_parameters(models)
         if method == "relaxation":
-            if not all(isinstance(model, KarplusStrongTriangleRelaxation) for model in models):
-                raise TypeError("Relaxation requires triangle relaxation models.")
-            discrete = [parameter for model in models for parameter in
-                        (model.A_logits, model.delay_len_parameter)]
+            relaxation_type = (KarplusStrongTriangleRelaxation if position == "A"
+                               else KarplusStrongPluckRelaxation)
+            if not all(isinstance(model, relaxation_type) for model in models):
+                raise TypeError("Relaxation requires matching relaxation models.")
+            discrete = []
+            continuous += [parameter for model in models for parameter in
+                           (model.delay_len_parameter, model.position_parameter)]
         else:
             discrete = [parameter for model in models for parameter in
-                        (model.L_logits, model.A_logits)]
-        groups = [{"params": discrete, "lr": config.discrete_lr}]
+                        (model.L_logits, getattr(model, second_name))]
+        groups = [{"params": discrete, "lr": config.discrete_lr}] if discrete else []
         if continuous:
             groups.append({"params": continuous, "lr": config.continuous_lr})
         optimizer = torch.optim.Adam(groups)
-        phase_one = trange(config.epochs, desc="Triangle fit",
+        phase_one = trange(config.epochs, desc=f"Phase 1: {method}",
                            disable=not config.show_progress)
         for epoch_index in phase_one:
             optimizer.zero_grad()
             if method == "gumbel":
+                progress = epoch_index / max(config.epochs - 1, 1)
+                temperature = config.gumbel_temperature * (
+                    config.gumbel_temperature_end / config.gumbel_temperature) ** progress
                 causal_parts, surrogate_parts = [], []
                 for model in models:
                     logits = model._joint_logits()
-                    selection = F.gumbel_softmax(logits, tau=config.gumbel_temperature,
+                    selection = F.gumbel_softmax(logits, tau=temperature,
                                                   hard=True)
                     index = int(selection.detach().argmax())
-                    pair = model._decode(index)
+                    pair = (
+                        model._decode(index) if position == "A"
+                        else model._decode_index(index))
                     causal = model.time_domain_synth(config.n_fft,
                                                       model.L_logits.new_ones(1), *pair)
                     # Straight-through moments: valid hard pair in forward, fractional
                     # circular transfer function only in the backward derivative.
+                    candidates = getattr(model, candidate_name)
                     L_grid = model.L_candidates[:, None].expand(
-                        -1, model.A_candidates.numel()).flatten().to(selection.dtype)
-                    A_grid = model.A_candidates[None, :].expand(
+                        -1, candidates.numel()).flatten().to(selection.dtype)
+                    A_grid = candidates[None, :].expand(
                         model.L_candidates.numel(), -1).flatten().to(selection.dtype)
                     soft_L = (selection * L_grid).sum()
                     soft_A = (selection * A_grid).sum()
@@ -1192,52 +1185,33 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
                 measured = _triangle_spectral_loss(
                     causal_spectrum, target_spectrum, config.spectrum_normalization)
                 objective = _triangle_spectral_loss(
-                    causal_spectrum + surrogate_spectrum - surrogate_spectrum.detach(),
+                    causal_spectrum + (surrogate_spectrum - surrogate_spectrum.detach()),
                     target_spectrum, config.spectrum_normalization)
             else:
-                losses, log_probabilities = [], []
-                for i in range(config.reinforce_samples):
-                    pairs = []
-                    spectral_parts = []
-                    for model in models:
-                        distribution = model.A_distribution()
-                        index = distribution.sample()
-                        A = int(model.A_candidates[index])
-                        continuous_L = model.continuous_L()
-                        hard_L = int(continuous_L.detach().floor())
-                        pairs.append((hard_L, A))
-                        log_probabilities.append(distribution.log_prob(index))
-                        spectral_parts.append(model.spectral_response(
-                            model.L_logits.new_ones(1), continuous_L, A,
-                            delay_gain=model.scaled_gain().detach(),
-                            allpass=model.scaled_allplus().detach()))
-                    causal = torch.fft.rfft(_synth(models, config.n_fft, pairs))
-                    surrogate = torch.stack(spectral_parts).sum(0)
-                    losses.append(_triangle_spectral_loss(
-                        causal + surrogate - surrogate.detach(),
-                        target_spectrum, config.spectrum_normalization))
-                losses = torch.stack(losses)
-                detached = losses.detach()
-                baseline = (detached.sum() - detached) / (config.reinforce_samples - 1)
-                advantage = (detached - baseline) / (detached - baseline).std(
-                    unbiased=False).clamp_min(1e-6)
-                log_probs = torch.stack(log_probabilities).reshape(
-                    config.reinforce_samples, len(models)).sum(1)
-                measured = losses.mean()
-                objective = measured + (advantage.clamp(-5, 5) * log_probs).mean()
+                pairs = [model.selected_delays() for model in models]
+                causal = torch.fft.rfft(_synth(models, config.n_fft, pairs))
+                surrogate = torch.stack([
+                    model.spectral_response(
+                        model.L_logits.new_ones(1), model.continuous_L(),
+                        model.continuous_position(), delay_gain=model.scaled_gain().detach(),
+                        allpass=model.scaled_allplus().detach())
+                    for model in models
+                ]).sum(0)
+                measured = _triangle_spectral_loss(
+                    causal + (surrogate - surrogate.detach()),
+                    target_spectrum, config.spectrum_normalization)
+                objective = measured
             if not torch.isfinite(objective):
                 raise FloatingPointError("Nonfinite triangle objective.")
             objective.backward()
-            optimizer.step()
+            _checked_filtered_step(optimizer, models, f"{method} phase 1", epoch_index)
             if method == "relaxation":
-                with torch.no_grad():
-                    for model in models:
-                        model.delay_len_parameter.clamp_(
-                            float(model.L_candidates[0]), float(model.L_candidates[-1]))
+                for model in models:
+                    model.project_delays_()
             _record_triangle_step(result, models, measured,
                                   [model.selected_delays() for model in models])
             if config.show_progress and (
-                epoch_index == 0 or (epoch_index + 1) % 100 == 0
+                epoch_index == 0 or (epoch_index + 1) % config.print_frequency == 0
             ):
                 phase_one.set_postfix(
                     loss=f"{result.losses[-1]:.4f}",
@@ -1247,10 +1221,16 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
 
     # Phase 2: optimize only K and a using finite-causal mixture audio.
     result.pairs = pairs
+    for model in models:
+        model.L_logits.requires_grad_(False)
+        getattr(model, second_name).requires_grad_(False)
+        if hasattr(model, "delay_len_parameter"):
+            model.delay_len_parameter.requires_grad_(False)
+            model.position_parameter.requires_grad_(False)
     continuous = _continuous_parameters(models)
     if continuous and config.refine_epochs:
         optimizer = torch.optim.Adam(continuous, lr=config.continuous_lr)
-        phase_two = trange(config.refine_epochs, desc="Triangle causal refine",
+        phase_two = trange(config.refine_epochs, desc="Phase 2: causal K, a",
                            disable=not config.show_progress)
         for epoch_index in phase_two:
             optimizer.zero_grad()
@@ -1259,11 +1239,18 @@ def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
-            optimizer.step()
+            _checked_filtered_step(optimizer, models, f"{method} phase 2", epoch_index)
             _record_triangle_step(result, models, measured, pairs)
             if config.show_progress and (
-                epoch_index == 0 or (epoch_index + 1) % 100 == 0
+                epoch_index == 0 or (epoch_index + 1) % config.print_frequency == 0
             ):
                 phase_two.set_postfix(loss=f"{result.losses[-1]:.4f}",
                                       pairs=str(pairs))
     return result
+
+
+def fit_triangle(models: nn.ModuleList, target: torch.Tensor,
+                 config: TriangleFitConfig,
+                 indices: list[int] | None = None) -> TriangleFitResult:
+    """Fit single or multiple triangle sources from their summed audio."""
+    return fit_filtered(models, target, config, "A", indices)

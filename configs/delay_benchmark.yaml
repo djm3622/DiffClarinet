@@ -1,0 +1,41 @@
+# Paths are relative to the repository root. Independent instances are fixed
+# across optimizer seeds and methods; stems are disjoint within each source count.
+output_dir: output/delay_benchmark_k05
+datasets:
+  comb: data/vary_all_pluck
+  triangle: data/vary_all_triangle
+methods: [reinforce, gumbel, relaxation, exhaustive, pitch]
+source_counts: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  gain_min: 0.5
+  gain_max: 1.0
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 1000
+  show_progress: false

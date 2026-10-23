@@ -1,4 +1,11 @@
+"""Fit a single Karplus--Strong instance with a chosen delay estimation method.
+
+Supports the comb (pluck), triangle, and legacy noise-excitation datasets, and
+saves summaries, trajectories, plots, and audio."""
+
+
 import argparse
+from dataclasses import asdict
 import json
 import time
 from pathlib import Path
@@ -28,15 +35,10 @@ from model.kps.training import (
     TrainingConfig,
     TrainingResult,
     train_model,
-    train_pluck_exhaustive,
-    train_pluck_gumbel,
-    train_pluck_pitch,
     train_pluck_reinforce,
-    train_pluck_relaxation,
-    refine_pluck_continuous,
     TriangleFitConfig,
     fit_triangle,
-    fit_filtered_reinforce,
+    fit_filtered,
 )
 
 from .eval import listening, loss_landscape, plots
@@ -110,7 +112,10 @@ def _train_pluck_instance(
     )
     if delay_method == "relaxation":
         model = KarplusStrongPluckRelaxation(
-            delay_len_init=args.initial_L, **model_kwargs
+            delay_len_init=(args.initial_L if getattr(args, "relaxation_initialization",
+                                                     "configured") == "configured" else None),
+            position_init=getattr(args, "initial_position", None),
+            **model_kwargs
         )
     else:
         model = KarplusStrongPluck(**model_kwargs)
@@ -142,9 +147,9 @@ def _train_pluck_instance(
     )
     training_config = TrainingConfig(epochs=epochs, n_fft=n_fft)
     training_start = time.perf_counter()
-    if delay_method == "reinforce":
+    if delay_method is not None:
         filtered_config = TriangleFitConfig(
-            method="reinforce", epochs=epochs, refine_epochs=refine_epochs,
+            method=delay_method, epochs=epochs, refine_epochs=refine_epochs,
             n_fft=n_fft, reinforce_samples=args.reinforce_samples,
             initial_uniform_prior_weight=args.initial_uniform_prior_weight,
             final_uniform_prior_weight=args.final_uniform_prior_weight,
@@ -154,8 +159,13 @@ def _train_pluck_instance(
             spectrum_normalization=args.spectrum_normalization,
             print_frequency=args.print_frequency,
             show_progress=args.show_progress,
+            exhaustive_cap=args.exhaustive_cap,
+            gumbel_temperature=getattr(args, "gumbel_temperature_start", 1.0),
+            gumbel_temperature_end=getattr(args, "gumbel_temperature_end", 0.1),
+            continuous_lr=getattr(args, "continuous_lr", 1e-2),
+            discrete_lr=getattr(args, "discrete_lr", 3e-3),
         )
-        filtered = fit_filtered_reinforce(
+        filtered = fit_filtered(
             nn.ModuleList([model]), target_waveform[1:], filtered_config, "dp",
             [train_index])
         result = TrainingResult(
@@ -164,39 +174,10 @@ def _train_pluck_instance(
             allpass_trajectory=[initial_a] + [row[0] for row in filtered.allpass_trajectory],
             delay_trajectory=[initial_L] + [row[0][0] for row in filtered.trajectory],
             dp_trajectory=[initial_dp] + [row[0][1] for row in filtered.trajectory],
+            metadata={"search_evaluations": filtered.search_evaluations},
         )
-    elif delay_method is None:
-        result = train_pluck_reinforce(model, dataloader, training_config)
-    elif delay_method == "gumbel":
-        result = train_pluck_gumbel(model, dataloader, training_config)
-    elif delay_method == "relaxation":
-        result = train_pluck_relaxation(model, dataloader, training_config)
-    elif delay_method == "exhaustive":
-        search_result = train_pluck_exhaustive(
-            model, dataloader, training_config
-        )
-        print(
-            f"Exhaustive selected L={model.scaled_delay_len()}, "
-            f"dp={model.scaled_dp()} before continuous refinement"
-        )
-        result = refine_pluck_continuous(
-            model,
-            dataloader,
-            TrainingConfig(epochs=refine_epochs, n_fft=n_fft),
-        )
-        result.metadata.update(search_result.metadata)
     else:
-        search_result = train_pluck_pitch(model, dataloader, training_config)
-        print(
-            f"Pitch baseline selected L={model.scaled_delay_len()}, "
-            f"dp={model.scaled_dp()} before continuous refinement"
-        )
-        result = refine_pluck_continuous(
-            model,
-            dataloader,
-            TrainingConfig(epochs=refine_epochs, n_fft=n_fft),
-        )
-        result.metadata.update(search_result.metadata)
+        result = train_pluck_reinforce(model, dataloader, training_config)
     training_wall_seconds = time.perf_counter() - training_start
     model.eval()
     selected_waveform = model.time_domain_synth(
@@ -236,19 +217,22 @@ def _train_pluck_instance(
         "seed": seed,
         "sample": Path(wav_paths[train_index]).name,
         "n_fft": training_config.n_fft,
-        "epochs": epochs if delay_method == "reinforce"
-        else len(result.reconstruction_losses),
-        "fit_epochs": epochs if delay_method == "reinforce" else None,
-        "refine_epochs": refine_epochs if delay_method == "reinforce" else None,
+        "epochs": epochs,
+        "fit_epochs": epochs if delay_method is not None else None,
+        "refine_epochs": refine_epochs if delay_method is not None else None,
         "total_training_steps": len(result.reconstruction_losses),
         "spectrum_normalization": args.spectrum_normalization
-        if delay_method == "reinforce" else "peak",
+        if delay_method is not None else "peak",
         "reinforce_fit_domain": "finite_causal"
         if delay_method == "reinforce" else None,
         "phase1_target": "first_n_fft_causal_samples"
-        if delay_method == "reinforce" else None,
+        if delay_method is not None else None,
         "refinement_domain": "finite_causal"
-        if delay_method == "reinforce" else None,
+        if delay_method is not None else None,
+        "fit_config": asdict(filtered_config) if delay_method is not None else None,
+        "fit_domain": "finite_causal" if delay_method is not None else None,
+        "backward_surrogate": "circular_transfer_function"
+        if delay_method in {"gumbel", "relaxation"} else None,
         "excitation_filter": "two_tap_comb",
         "initialization": "seeded_random_L_dp_K_a"
         if delay_method == "reinforce" else "configured",
@@ -289,6 +273,10 @@ def _train_pluck_instance(
         a=np.asarray(result.allpass_trajectory),
         L=np.asarray(result.delay_trajectory),
         dp=np.asarray(result.dp_trajectory),
+        continuous_L=np.asarray(filtered.continuous_delay_trajectory)
+        if delay_method is not None else np.empty((0, 1)),
+        continuous_position=np.asarray(filtered.continuous_position_trajectory)
+        if delay_method is not None else np.empty((0, 1)),
     )
     listening.save_audio(str(output_dir / "target.wav"), target_waveform, sample_rate)
     listening.save_audio(
@@ -327,7 +315,10 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
     )
     if args.method == "relaxation":
         model = KarplusStrongTriangleRelaxation(
-            delay_len_init=args.initial_L, **model_kwargs)
+            delay_len_init=(args.initial_L if getattr(args, "relaxation_initialization",
+                                                     "configured") == "configured" else None),
+            position_init=getattr(args, "initial_position", None),
+            **model_kwargs)
     else:
         model = KarplusStrongTriangle(**model_kwargs)
     print(
@@ -359,6 +350,10 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         spectrum_normalization=getattr(args, "spectrum_normalization", "none"),
         print_frequency=getattr(args, "print_frequency", 1000),
         exhaustive_cap=args.exhaustive_cap,
+        gumbel_temperature=getattr(args, "gumbel_temperature_start", 1.0),
+        gumbel_temperature_end=getattr(args, "gumbel_temperature_end", 0.1),
+        continuous_lr=getattr(args, "continuous_lr", 1e-2),
+        discrete_lr=getattr(args, "discrete_lr", 3e-3),
         show_progress=getattr(args, "show_progress", True),
     )
     start = time.perf_counter()
@@ -400,11 +395,14 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
         "n_fft": args.n_fft, "epochs": args.epochs,
         "refine_epochs": args.refine_epochs,
         "total_training_steps": len(result.losses),
+        "fit_config": asdict(config),
+        "fit_domain": "finite_causal",
+        "backward_surrogate": "circular_transfer_function"
+        if args.method in {"gumbel", "relaxation"} else None,
         "spectrum_normalization": config.spectrum_normalization,
         "reinforce_fit_domain": "finite_causal"
         if args.method == "reinforce" else None,
-        "phase1_target": "first_n_fft_causal_samples"
-        if args.method == "reinforce" else None,
+        "phase1_target": "first_n_fft_causal_samples",
         "refinement_domain": "finite_causal",
         "excitation_filter": "triangle_fir",
         "initialization": "seeded_random_L_A_K_a"
@@ -429,7 +427,9 @@ def _train_triangle_instance(args: argparse.Namespace) -> None:
                         loss=np.asarray(result.losses),
                         pairs=np.asarray(result.trajectory),
                         K=np.asarray(result.gain_trajectory),
-                        a=np.asarray(result.allpass_trajectory))
+                        a=np.asarray(result.allpass_trajectory),
+                        continuous_L=np.asarray(result.continuous_delay_trajectory),
+                        continuous_position=np.asarray(result.continuous_position_trajectory))
     for name, audio in (("target", target), ("initial_synthesis", initial),
                         ("selected_synthesis", prediction)):
         wavfile.write(output / f"{name}.wav", sample_rate,
@@ -478,6 +478,10 @@ def main() -> None:
     parser.add_argument("--initial-K", type=float, default=0.9)
     parser.add_argument("--initial-a", type=float, default=0.5)
     parser.add_argument("--initial-L", type=float, default=150.5)
+    parser.add_argument("--relaxation-initialization", choices=("random", "configured"),
+                        default="random", help="Seeded random delays or explicit initial values")
+    parser.add_argument("--initial-position", type=float, default=None,
+                        help="Continuous dp/A initialization; default: valid range midpoint")
     parser.add_argument("--reinforce-samples", type=int, default=4)
     parser.add_argument("--initial-uniform-prior-weight", type=float, default=5e-2)
     parser.add_argument("--final-uniform-prior-weight", type=float, default=1e-3)
@@ -487,6 +491,10 @@ def main() -> None:
     parser.add_argument("--spectrum-normalization", choices=("peak", "none"),
                         default="none")
     parser.add_argument("--print-frequency", type=int, default=1000)
+    parser.add_argument("--gumbel-temperature-start", type=float, default=1.0)
+    parser.add_argument("--gumbel-temperature-end", type=float, default=0.1)
+    parser.add_argument("--continuous-lr", type=float, default=1e-2)
+    parser.add_argument("--discrete-lr", type=float, default=3e-3)
     parser.add_argument("--exhaustive-cap", type=int, default=10_000)
     parser.add_argument("--no-progress", dest="show_progress",
                         action="store_false")

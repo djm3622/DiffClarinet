@@ -1,0 +1,41 @@
+output_dir: output/gumbel_cause_followup_native_20261016
+benchmark_config: configs/delay_benchmark_bluehive_k05.yaml
+index: 5609
+seeds:
+- 0
+training:
+  steps: 20000
+  samples: 8
+  lr: 0.003
+  temperature_start: 1.0
+  temperature_end: 0.1
+  regularization: true
+states:
+- name: fixed_dp
+  parameters: truth
+  domain: causal
+  fixed_dp: 50
+  estimators:
+  - scalar_moment
+  - candidate_loss
+- name: fixed_L
+  parameters: truth
+  domain: causal
+  fixed_L: 100
+  estimators:
+  - scalar_moment
+  - candidate_loss
+- name: masked_fixed_L
+  parameters: truth
+  domain: causal
+  fixed_L: 100
+  mask_notches: true
+  estimators:
+  - scalar_moment
+- name: masked_joint
+  parameters: truth
+  domain: causal
+  mask_notches: true
+  estimators:
+  - scalar_moment
+gradient_audit: true

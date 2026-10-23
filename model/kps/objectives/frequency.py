@@ -1,3 +1,6 @@
+"""Frequency-domain losses: log-magnitude L1 error and auraloss STFT losses."""
+
+
 import torch
 import auraloss
 

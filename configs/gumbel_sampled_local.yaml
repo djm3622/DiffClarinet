@@ -1,0 +1,26 @@
+output_dir: output/gumbel_sampled_local_20261017
+benchmark_config: configs/delay_benchmark_bluehive_k05.yaml
+cases:
+- filter: comb
+  indices:
+  - 5609
+  seed: 0
+- filter: comb
+  indices:
+  - 212
+  seed: 2
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  samples: 8
+  n_fft: 8192
+  temperature_start: 1.0
+  temperature_end: 0.1
+  discrete_lr: 0.003
+  continuous_lr: 0.01
+  prior_start: 0.05
+  prior_end: 0.001
+  smoothness: 0.0001
+  spectrum_normalization: none
+  log_every: 500
+  physical_weighting: uniform

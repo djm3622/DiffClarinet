@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .dkps_fixed import KarplusStrongFixed
+from .relaxation_pair import ContinuousDelayPairMixin
 
 
 class KarplusStrongPluck(KarplusStrongFixed):
@@ -64,6 +65,15 @@ class KarplusStrongPluck(KarplusStrongFixed):
     def selected_delays(self) -> tuple[int, int]:
         return self._decode_index(int(torch.argmax(self._joint_logits()).item()))
 
+    def all_pairs(self) -> list[tuple[int, int]]:
+        return [self._decode_index(int(index)) for index in
+                torch.isfinite(self._joint_logits()).nonzero().flatten()]
+
+    def select_pair(self, pair: tuple[int, int]) -> None:
+        if pair not in self.all_pairs():
+            raise ValueError("Pair is outside the valid candidate grid.")
+        self.set_selected_delays(*pair)
+
     def scaled_delay_len(self) -> int:
         return self.selected_delays()[0]
 
@@ -111,7 +121,8 @@ class KarplusStrongPluck(KarplusStrongFixed):
         self.L_logits.requires_grad_(False)
 
     def logits_smoothness(self) -> torch.Tensor:
-        dp_penalty = self.dp_logits.diff().square().mean()
+        dp_penalty = (self.dp_logits.diff().square().mean()
+                      if self.dp_logits.numel() > 1 else self.dp_logits.new_zeros(()))
         if self.fixed_L is not None:
             return dp_penalty
         return self.L_logits.diff().square().mean() + dp_penalty
@@ -206,49 +217,13 @@ class KarplusStrongPluck(KarplusStrongFixed):
         )
 
 
-class KarplusStrongPluckRelaxation(KarplusStrongPluck):
-    """Continuous-L surrogate with a categorical integer pluck delay."""
+class KarplusStrongPluckRelaxation(ContinuousDelayPairMixin, KarplusStrongPluck):
+    """Continuous L and dp; causal synthesis floors both delays."""
 
-    def __init__(self, *args, delay_len_init: float, **kwargs) -> None:
+    def __init__(self, *args, delay_len_init: float | None = None,
+                 position_init: float | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        lower = float(self.L_candidates[0])
-        upper = float(self.L_candidates[-1])
-        if not lower <= delay_len_init <= upper:
-            raise ValueError("Initial continuous L must be in the candidate range.")
-        self.L_logits.requires_grad_(False)
-        self.delay_len_parameter = nn.Parameter(
-            torch.tensor(float(delay_len_init))
-        )
-
-    def scaled_delay_len(self) -> torch.Tensor:
-        return self.delay_len_parameter.clamp(
-            float(self.L_candidates[0]), float(self.L_candidates[-1])
-        )
-
-    def dp_distribution(self) -> torch.distributions.Categorical:
-        integer_L = int(self.scaled_delay_len().detach().floor().item())
-        logits = self.dp_logits.masked_fill(
-            self.dp_candidates >= integer_L, -torch.inf
-        )
-        return torch.distributions.Categorical(logits=logits)
+        self._init_continuous_pair(delay_len_init, position_init, "dp")
 
     def scaled_dp(self) -> int:
-        return int(self.dp_candidates[torch.argmax(
-            self.dp_distribution().logits
-        )].item())
-
-    def _resolve_delays(
-        self, delay_len: int | None, dp: int | None
-    ) -> tuple[int, int]:
-        L = (
-            int(self.scaled_delay_len().detach().floor().item())
-            if delay_len is None else int(delay_len)
-        )
-        pluck_delay = self.scaled_dp() if dp is None else int(dp)
-        if not (
-            int(self.L_candidates[0]) <= L <= int(self.L_candidates[-1])
-            and int(self.dp_candidates[0]) <= pluck_delay <= int(self.dp_candidates[-1])
-            and pluck_delay < L
-        ):
-            raise ValueError("Require candidate delays with 1 <= dp < L.")
-        return L, pluck_delay
+        return self.selected_delays()[1]

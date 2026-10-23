@@ -1,3 +1,6 @@
+"""Collect and compare gain predictions from the adaptive model."""
+
+
 import torch
 
 

@@ -1,3 +1,10 @@
+"""PyTorch datasets pairing MATLAB-generated target WAVs with excitations and labels.
+
+MatlabData is the original noise-excitation loader, MatlabPluckData loads the
+two-tap comb (pluck) targets, and MatlabTriangleData loads the triangle-filtered
+targets after validating them against the dataset manifest."""
+
+
 import torch
 from torch.utils.data import Dataset
 from scipy.io import loadmat
@@ -82,7 +89,8 @@ class MatlabPluckData(Dataset):
 class MatlabTriangleData(Dataset):
     """Validated causal targets; labels and MATLAB excitation stay outside batches."""
 
-    def __init__(self, wav_paths: list[str], manifest: dict) -> None:
+    def __init__(self, wav_paths: list[str], manifest: dict,
+                 restore_scale: bool = False) -> None:
         from pathlib import Path
 
         required = {"sample_rate", "causal_samples", "leading_zero", "sign", "audio_format"}
@@ -98,7 +106,10 @@ class MatlabTriangleData(Dataset):
             metadata = loadmat(mat_path, variable_names=["impulse_gain", "scale"])
             if float(metadata["impulse_gain"].item()) != 1.0:
                 raise ValueError(f"Nonunit impulse gain: {mat_path}")
-            if float(metadata["scale"].item()) != 1.0:
+            scale = float(metadata["scale"].item())
+            if not torch.isfinite(torch.tensor(scale)) or scale <= 0:
+                raise ValueError(f"Invalid target scale: {mat_path}")
+            if scale != 1.0 and not restore_scale:
                 raise ValueError(f"Scaled triangle target: {mat_path}")
             waveform, sample_rate = preprocessing.load_target_waveforms(wav_path)
             if waveform.shape[0] != 1 or sample_rate != int(manifest["sample_rate"]):
@@ -112,6 +123,10 @@ class MatlabTriangleData(Dataset):
             if (manifest["audio_format"] == "24-bit PCM WAV"
                     and waveform.abs().max() >= 0.99999):
                 raise ValueError(f"Potentially clipped PCM target: {wav_path}")
+            if restore_scale:
+                waveform = waveform / scale
+                if not torch.isfinite(waveform).all():
+                    raise ValueError(f"Nonfinite restored target: {wav_path}")
             self.examples.append((waveform[0, 1:].contiguous(), sample_rate,
                                   torch.ones(1, dtype=waveform.dtype)))
 

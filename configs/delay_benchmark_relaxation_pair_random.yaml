@@ -1,0 +1,58 @@
+# Corrected continuous L and position; independent seeded random delays per source.
+output_dir: output/delay_benchmark_relaxation_pair_random
+datasets:
+  comb: data/vary_all_pluck
+  triangle: data/vary_all_triangle
+methods:
+- relaxation
+source_counts:
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+- 8
+- 9
+- 10
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  relaxation_initialization: random
+  initial_position: null
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 1
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 1000
+  show_progress: false
+workers: 1

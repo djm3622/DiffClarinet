@@ -1,3 +1,9 @@
+"""Delay-length estimators built on the fixed Karplus--Strong model.
+
+Provides continuous relaxation, REINFORCE, hard Gumbel--Softmax, exhaustive
+search, and pitch-estimate variants for selecting the integer loop length L."""
+
+
 from collections.abc import Callable
 
 import torch

@@ -1,0 +1,28 @@
+output_dir: output/gumbel_cause_native_20261016
+benchmark_config: configs/delay_benchmark_bluehive_k05.yaml
+index: 5609
+seeds:
+- 0
+training:
+  steps: 20000
+  samples: 8
+  lr: 0.003
+  temperature_start: 1.0
+  temperature_end: 0.1
+  regularization: true
+states:
+- name: truth_causal
+  parameters: truth
+  domain: causal
+  estimators:
+  - scalar_moment
+  - candidate_loss
+  - reinforce
+  - exact_expected
+- name: truth_circular
+  parameters: truth
+  domain: circular
+  estimators:
+  - scalar_moment
+  - candidate_loss
+gradient_audit: true

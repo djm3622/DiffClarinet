@@ -1,3 +1,6 @@
+"""Matplotlib plots of frequency responses and predicted versus true loop gains."""
+
+
 import matplotlib.pyplot as plt
 import torch
 

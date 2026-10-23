@@ -1,3 +1,6 @@
+"""Residual 1D CNN encoder mapping audio to a single scalar."""
+
+
 from torch import nn
 
 
