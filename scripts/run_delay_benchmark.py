@@ -35,14 +35,20 @@ from torch import nn
 import yaml
 
 from data.dataset import MatlabPluckData, MatlabTriangleData
-from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
-from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
+from model.kps.pluck import (KarplusStrongPluck, KarplusStrongPluckLagrange,
+                             KarplusStrongPluckRelaxation)
+from model.kps.triangle import (KarplusStrongTriangle, KarplusStrongTriangleLagrange,
+                                KarplusStrongTriangleRelaxation)
 from model.kps.training import TriangleFitConfig, TriangleFitResult, fit_filtered, _pitch_lengths
 from diagnostics.gumbel_sampled_surrogate import fit_sampled
 
 
 ROOT = Path(__file__).resolve().parents[1]
-METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch"}
+METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch",
+           "lagrange", "round_ste"}
+# Methods whose L and position are continuous parameters, by model family.
+CONTINUOUS_DELAY_FAMILIES = {"relaxation": "relaxation", "lagrange": "lagrange",
+                             "round_ste": "lagrange"}
 METRICS = (
     "rmse",
     "snr_db",
@@ -197,11 +203,13 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
     settings = config["model"]
     position = "dp" if kind == "comb" else "A"
     model_type = {
-        ("comb", False): KarplusStrongPluck,
-        ("comb", True): KarplusStrongPluckRelaxation,
-        ("triangle", False): KarplusStrongTriangle,
-        ("triangle", True): KarplusStrongTriangleRelaxation,
-    }[kind, method == "relaxation"]
+        ("comb", None): KarplusStrongPluck,
+        ("comb", "relaxation"): KarplusStrongPluckRelaxation,
+        ("comb", "lagrange"): KarplusStrongPluckLagrange,
+        ("triangle", None): KarplusStrongTriangle,
+        ("triangle", "relaxation"): KarplusStrongTriangleRelaxation,
+        ("triangle", "lagrange"): KarplusStrongTriangleLagrange,
+    }[kind, CONTINUOUS_DELAY_FAMILIES.get(method)]
     kwargs = {
         "delay_len_min": settings["L_min"],
         "delay_len_max": settings["L_max"],
@@ -217,7 +225,7 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
         "delay_gain_learnable": True,
         "random_init": method == "reinforce",
     }
-    if method == "relaxation":
+    if method in CONTINUOUS_DELAY_FAMILIES:
         initialization = settings.get("relaxation_initialization", "random")
         if initialization not in {"random", "configured"}:
             raise ValueError("relaxation_initialization must be random or configured")
@@ -537,7 +545,8 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             "search_evaluations": result.search_evaluations,
             "search_size": search_size,
             "fit_domain": "finite_causal_first_n_fft",
-            "relaxation_parameters": ["L", "position"] if row["method"] == "relaxation" else None,
+            "relaxation_parameters": (["L", "position"] if row["method"] in CONTINUOUS_DELAY_FAMILIES
+                                      else None),
             "evaluation_domain": "full_causal_audio",
             "audio_format": "float32 WAV, original amplitudes, no peak normalization",
             "position_parameter": "dp" if row["filter"] == "comb" else "A",

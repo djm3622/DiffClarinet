@@ -3,8 +3,10 @@
 import torch
 import torchaudio
 from torch import nn
+from torch.nn import functional as F
 
 from .dkps_fixed import KarplusStrongFixed
+from .fractional_delay import LagrangeDelayPairMixin
 from .relaxation_pair import ContinuousDelayPairMixin
 
 
@@ -158,3 +160,24 @@ class KarplusStrongTriangleRelaxation(ContinuousDelayPairMixin, KarplusStrongTri
                  position_init: float | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._init_continuous_pair(delay_len_init, position_init, "A")
+
+
+class KarplusStrongTriangleLagrange(LagrangeDelayPairMixin, KarplusStrongTriangle):
+    """Continuous L and A; causal synthesis with a Lagrange fractional loop delay."""
+
+    def __init__(self, *args, delay_len_init: float | None = None,
+                 position_init: float | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_continuous_pair(delay_len_init, position_init, "A")
+
+    def lagrange_synth(self, n_samples: int,
+                       straight_through: bool = False) -> torch.Tensor:
+        L, A = self.synthesis_delays(straight_through)
+        size = int(L.detach().floor()) + 8
+        K, numerator, denominator = self._loop_coefficients(L, size)
+        excitation = self.excitation(n_samples, self.L_logits.new_ones(1), L, A, K)
+        output = torchaudio.functional.lfilter(
+            excitation, denominator, F.pad(numerator, (0, size - 3)), clamp=False)
+        if not bool(torch.isfinite(output).all()):
+            raise FloatingPointError("Nonfinite causal triangle output.")
+        return output

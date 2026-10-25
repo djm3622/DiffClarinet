@@ -26,8 +26,9 @@ from .delay_methods import (
     KarplusStrongReinforce,
 )
 from .dkps_fixed import KarplusStrongFixed
-from .pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
-from .triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
+from .pluck import KarplusStrongPluck, KarplusStrongPluckLagrange, KarplusStrongPluckRelaxation
+from .triangle import (KarplusStrongTriangle, KarplusStrongTriangleLagrange,
+                       KarplusStrongTriangleRelaxation)
 from .objectives.frequency import loss_fn, to_log_mag
 
 
@@ -775,6 +776,10 @@ def train_model(
 
 
 # Triangle unit-impulse fitting for both single and known-count mixtures.
+# Lagrange fractional synthesis; round_ste rounds delays in the forward pass.
+LAGRANGE_METHODS = ("lagrange", "round_ste")
+
+
 @dataclass(frozen=True)
 class TriangleFitConfig:
     method: str = "reinforce"
@@ -797,7 +802,8 @@ class TriangleFitConfig:
     show_progress: bool = False
 
     def __post_init__(self) -> None:
-        if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
+        if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation",
+                               *LAGRANGE_METHODS}:
             raise ValueError("Unsupported triangle fitting method.")
         if self.spectrum_normalization not in {"peak", "none"}:
             raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
@@ -1093,6 +1099,12 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
     if config.method != "relaxation" and any(
             isinstance(model, relaxation_types) for model in models):
         raise TypeError("Relaxation models require the relaxation fitting method.")
+    lagrange_types = (KarplusStrongTriangleLagrange, KarplusStrongPluckLagrange)
+    if config.method in LAGRANGE_METHODS:
+        if not all(isinstance(model, lagrange_types) for model in models):
+            raise TypeError("Lagrange fitting requires Lagrange models.")
+    elif any(isinstance(model, lagrange_types) for model in models):
+        raise TypeError("Lagrange models require the lagrange or round_ste fitting method.")
     if config.method == "reinforce":
         return fit_filtered_reinforce(models, target, config, position, indices)
     if not models or target.ndim != 1 or target.numel() < config.n_fft:
@@ -1136,6 +1148,11 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                                else KarplusStrongPluckRelaxation)
             if not all(isinstance(model, relaxation_type) for model in models):
                 raise TypeError("Relaxation requires matching relaxation models.")
+            discrete = []
+            continuous += [parameter for model in models for parameter in
+                           (model.delay_len_parameter, model.position_parameter)]
+        elif method in LAGRANGE_METHODS:
+            # Ordinary gradients for L, position, K and a through causal synthesis.
             discrete = []
             continuous += [parameter for model in models for parameter in
                            (model.delay_len_parameter, model.position_parameter)]
@@ -1187,6 +1204,14 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                 objective = _triangle_spectral_loss(
                     causal_spectrum + (surrogate_spectrum - surrogate_spectrum.detach()),
                     target_spectrum, config.spectrum_normalization)
+            elif method in LAGRANGE_METHODS:
+                prediction = torch.stack([
+                    model.lagrange_synth(config.n_fft, method == "round_ste")
+                    for model in models
+                ]).sum(0)
+                measured = _loss(prediction, target_spectrum,
+                                 config.spectrum_normalization)
+                objective = measured
             else:
                 pairs = [model.selected_delays() for model in models]
                 causal = torch.fft.rfft(_synth(models, config.n_fft, pairs))
@@ -1205,7 +1230,7 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                 raise FloatingPointError("Nonfinite triangle objective.")
             objective.backward()
             _checked_filtered_step(optimizer, models, f"{method} phase 1", epoch_index)
-            if method == "relaxation":
+            if method in {"relaxation", *LAGRANGE_METHODS}:
                 for model in models:
                     model.project_delays_()
             _record_triangle_step(result, models, measured,
