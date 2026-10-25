@@ -39,10 +39,13 @@ from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
 from model.kps.training import TriangleFitConfig, TriangleFitResult, fit_filtered, _pitch_lengths
 from diagnostics.gumbel_sampled_surrogate import fit_sampled
+from diagnostics.random_search import fit_random_search
 
 
 ROOT = Path(__file__).resolve().parents[1]
-METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch"}
+RANDOM_SEARCH = {"random_search_global": "global", "random_search_local": "local"}
+METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch",
+           *RANDOM_SEARCH}
 METRICS = (
     "rmse",
     "snr_db",
@@ -139,6 +142,8 @@ def read_config(path: Path, overrides: list[str]) -> dict:
     }
     if "sampled_gumbel" in config:
         expected.add("sampled_gumbel")
+    if "random_search" in config:
+        expected.add("random_search")
     if set(config) != expected:
         raise ValueError(f"Expected configuration keys {sorted(expected)}")
     if not config["methods"] or not set(config["methods"]) <= METHODS:
@@ -149,6 +154,14 @@ def read_config(path: Path, overrides: list[str]) -> dict:
                 or type(settings.get("samples")) is not int or settings["samples"] < 2
                 or settings.get("physical_weighting") not in {"uniform", "softmax"}):
             raise ValueError("sampled_gumbel requires samples >= 2 and uniform/softmax physical_weighting.")
+    if set(config["methods"]) & set(RANDOM_SEARCH):
+        settings = config.get("random_search", {})
+        if (set(settings) != {"samples", "local_radius", "local_probability"}
+                or type(settings["samples"]) is not int or settings["samples"] < 2
+                or type(settings["local_radius"]) is not int or settings["local_radius"] < 1
+                or not 0 <= settings["local_probability"] <= 1):
+            raise ValueError("random_search requires samples >= 2, local_radius >= 1 "
+                             "and local_probability in [0, 1].")
     if not config["datasets"] or not set(config["datasets"]) <= {"comb", "triangle"}:
         raise ValueError("Datasets must be comb and/or triangle.")
     for key in ("methods", "source_counts", "seeds"):
@@ -171,9 +184,9 @@ def read_config(path: Path, overrides: list[str]) -> dict:
 
 
 def filtered_config(config: dict, method: str) -> TriangleFitConfig:
-    """Validate common settings; sampled Gumbel has a separate benchmark dispatch."""
-    return TriangleFitConfig(method="gumbel" if method == "gumbel_sampled" else method,
-                             **config["fit"])
+    """Validate common settings; sampled Gumbel and random search dispatch separately."""
+    shared = "gumbel" if method == "gumbel_sampled" or method in RANDOM_SEARCH else method
+    return TriangleFitConfig(method=shared, **config["fit"])
 
 
 def sampled_config(config: dict) -> dict:
@@ -188,6 +201,18 @@ def sampled_config(config: dict) -> dict:
         "prior_start": fit["initial_uniform_prior_weight"],
         "prior_end": fit["final_uniform_prior_weight"],
         "smoothness": fit["ordinal_smoothness_weight"],
+        "spectrum_normalization": fit["spectrum_normalization"],
+        "log_every": fit["print_frequency"],
+    }
+
+
+def random_search_config(config: dict, method: str) -> dict:
+    """Same update and synthesis budget as REINFORCE/sampled Gumbel."""
+    fit = config["fit"]
+    return {
+        **config["random_search"], "variant": RANDOM_SEARCH[method],
+        "epochs": fit["epochs"], "refine_epochs": fit["refine_epochs"],
+        "n_fft": fit["n_fft"], "continuous_lr": fit["continuous_lr"],
         "spectrum_normalization": fit["spectrum_normalization"],
         "log_every": fit["print_frequency"],
     }
@@ -490,6 +515,18 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             gain_trajectory=[entry["K"] for entry in history],
             allpass_trajectory=[entry["a"] for entry in history])
         write_json(output / "sampled_history.json", history)
+    elif row["method"] in RANDOM_SEARCH:
+        (output / "search_progress.jsonl").write_text("")
+        history, source_syntheses = fit_random_search(
+            models, stems.sum(0), random_search_config(config, row["method"]),
+            output / "search_progress.jsonl")
+        result = TriangleFitResult(
+            pairs=[model.selected_delays() for model in models],
+            losses=[entry["loss"] for entry in history],
+            trajectory=[entry["pairs"] for entry in history],
+            gain_trajectory=[entry["K"] for entry in history],
+            allpass_trajectory=[entry["a"] for entry in history])
+        write_json(output / "search_history.json", history)
     else:
         result = fit_filtered(
             models, stems.sum(0), fit_config,
@@ -527,10 +564,15 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             "metrics": metrics,
             "matched_sources": matches,
             "fit_config": {**asdict(fit_config), "method": row["method"]},
-            "sampled_gumbel_config": sampled_config(config) if source_syntheses is not None else None,
+            "sampled_gumbel_config": (sampled_config(config)
+                                      if row["method"] == "gumbel_sampled" else None),
+            "random_search_config": (random_search_config(config, row["method"])
+                                     if row["method"] in RANDOM_SEARCH else None),
             "training_source_syntheses": source_syntheses,
-            "estimator": ("biased top-K support under factorized Gumbel perturbations"
-                          if source_syntheses is not None else None),
+            "estimator": {"gumbel_sampled": "biased top-K support under factorized Gumbel perturbations",
+                          "random_search_global": "incumbent plus uniform joint redraws",
+                          "random_search_local": "incumbent plus one-source redraws/local moves",
+                          }.get(row["method"]),
             "fit_seconds": fit_seconds,
             "sample_rate": rate,
             "samples": stems.shape[-1],
