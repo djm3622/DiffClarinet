@@ -1,0 +1,54 @@
+# Lagrange fractional delays and rounded straight-through delays on the k05 cases:
+# instances 0-9 (identical draws to instances: 32), seed 0, fixed L=150.5 initialization.
+# Instances 0-4 already ran under delay_benchmark_lagrange_ste.yaml; submit tasks for 5-9 only.
+output_dir: output/delay_benchmark_lagrange_ste_i10
+datasets:
+  comb: data/vary_all_pluck
+  triangle: data/vary_all_triangle
+methods:
+- lagrange
+- round_ste
+source_counts:
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+seeds:
+- 0
+instances: 10
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  relaxation_initialization: configured
+  initial_position: null
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 1000
+  show_progress: false
+workers: 1
