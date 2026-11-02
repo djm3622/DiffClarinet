@@ -6,6 +6,7 @@ No population-trained neural estimator is introduced here.
 """
 
 import argparse
+import copy
 from contextlib import redirect_stderr, redirect_stdout
 import csv
 from dataclasses import asdict
@@ -38,7 +39,7 @@ from data.dataset import MatlabPluckData, MatlabTriangleData
 from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
 from model.kps.training import (TriangleFitConfig, TriangleFitResult, fit_filtered,
-                                _pitch_lengths, set_gain_)
+                                _loss, _pitch_lengths, _synth, set_gain_)
 from diagnostics.gumbel_sampled_surrogate import fit_sampled
 from diagnostics.random_search import fit_random_search
 
@@ -517,6 +518,37 @@ def add_target_noise(target: torch.Tensor, row: dict, config: dict
                    "scored_against": "clean stems and clean (L, position) labels"}
 
 
+def fit_window_losses(models: nn.ModuleList, truth: list[dict], targets: dict,
+                      config: dict) -> dict:
+    """Fit-window loss of the found sources and of the true (L, position, K, a).
+
+    ``truth_initial_a`` keeps the true L, position and K but uses the configured
+    initial a, the a at which joint grid searches score candidates.
+    """
+    fit = config["fit"]
+    found = [model.selected_delays() for model in models]
+    true_pairs = [(int(values["L"]), int(values["position"])) for values in truth]
+    reference = copy.deepcopy(models)
+    with torch.no_grad():
+        for model, values in zip(reference, truth):
+            set_gain_(model, values["K"])
+            model.a.copy_(torch.logit(model.a.new_tensor(values["a"])))
+        losses = {}
+        for name, target in targets.items():
+            spectrum = torch.fft.rfft(target[:fit["n_fft"]])
+            score = lambda sources, pairs: float(_loss(
+                _synth(sources, fit["n_fft"], pairs), spectrum, fit["spectrum_normalization"]))
+            losses[name] = {"found": score(models, found), "truth": score(reference, true_pairs)}
+        for model in reference:
+            model.a.copy_(torch.logit(model.a.new_tensor(config["model"]["initial_a"])))
+        for name, target in targets.items():
+            spectrum = torch.fft.rfft(target[:fit["n_fft"]])
+            losses[name]["truth_initial_a"] = float(_loss(
+                _synth(reference, fit["n_fft"], true_pairs), spectrum,
+                fit["spectrum_normalization"]))
+    return losses
+
+
 def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     seed = row["seed"]
     random.seed(seed)
@@ -586,6 +618,8 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             models, target, fit_config,
             "dp" if row["filter"] == "comb" else "A", json.loads(row["indices"]))
     fit_seconds = time.perf_counter() - start
+    targets = {"observed": target} if noise is None else {"observed": target, "clean": stems.sum(0)}
+    losses = fit_window_losses(models, truth, targets, config)
     models.eval()
     metrics, matches = evaluate(
         synthesize(models, stems.shape[-1]), stems, models, truth, paths, output, rate
@@ -624,6 +658,7 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
                                      if row["method"] in RANDOM_SEARCH else None),
             "training_source_syntheses": source_syntheses,
             "target_noise": noise,
+            "fit_window_losses": losses,
             "oracle": {"reinforce_oracle_K": "K fixed to each source's true K"}.get(row["method"]),
             "estimator": {"gumbel_sampled": "biased top-K support under factorized Gumbel perturbations",
                           "random_search_global": "incumbent plus uniform joint redraws",

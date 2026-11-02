@@ -34,12 +34,12 @@ class PaperControlTests(unittest.TestCase):
         for path in NOISE.values():
             plan, _ = benchmark.make_plan(benchmark.read_config(path, []))
             self.assertEqual(len(plan), 90)
-        for snr in NOISE:
-            path = benchmark.ROOT / f"configs/delay_benchmark_noise_exhaustive_snr{snr}.yaml"
-            config = benchmark.read_config(path, [])
-            plan, _ = benchmark.make_plan(config)
-            self.assertEqual(len(plan), 64)
-            self.assertEqual(config["target_noise"]["snr_db"], snr)
+        config = benchmark.read_config(
+            benchmark.ROOT / "configs/delay_benchmark_noise_exhaustive_triangle_snr40.yaml", [])
+        plan, _ = benchmark.make_plan(config)
+        self.assertEqual(len(plan), 32)
+        self.assertEqual({row["filter"] for row in plan}, {"triangle"})
+        self.assertEqual(config["target_noise"]["snr_db"], 40)
 
     def test_set_gain_round_trip(self) -> None:
         source = make_source("dp")
@@ -75,6 +75,10 @@ class PaperControlTests(unittest.TestCase):
                 summary = json.loads((Path(directory) / "summary.json").read_text())
             self.assertEqual(summary["fit_config"]["method"], "reinforce_oracle_K")
             self.assertLess(summary["matched_sources"][0]["K_mae"], 1e-6)
+            losses = summary["fit_window_losses"]["observed"]
+            self.assertEqual(set(losses), {"found", "truth", "truth_initial_a"})
+            if summary["matched_sources"][0]["exact_pair_fraction"]:
+                self.assertAlmostEqual(losses["found"], losses["truth"], delta=0.5)
 
     def test_K_grid_dispatch_reports_grid_search_size(self) -> None:
         config = benchmark.read_config(CEILING, QUICK + ["exhaustive_K_grid=[0.6, 0.9]"])
