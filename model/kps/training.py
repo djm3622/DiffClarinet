@@ -795,10 +795,18 @@ class TriangleFitConfig:
     gumbel_temperature_end: float = 0.1
     exhaustive_cap: int = 10000
     show_progress: bool = False
+    # Exhaustive only: also search K jointly over this grid (a stays at its value).
+    exhaustive_gain_grid: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
             raise ValueError("Unsupported triangle fitting method.")
+        object.__setattr__(self, "exhaustive_gain_grid", tuple(self.exhaustive_gain_grid))
+        if self.exhaustive_gain_grid and (
+                self.method != "exhaustive"
+                or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
+                or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
+            raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
         if self.spectrum_normalization not in {"peak", "none"}:
             raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
         if self.print_frequency < 1:
@@ -917,8 +925,9 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         raise ValueError("Expected nonempty models and a one-dimensional long target.")
     if any(model.n_fft != config.n_fft for model in models):
         raise ValueError("Model and training FFT lengths must match.")
-    if len(_continuous_parameters(models)) != 2 * len(models):
-        raise ValueError("Every source must learn both K and a.")
+    # K may be fixed to a known (oracle) value; a is always learned.
+    if not all(model.all_plus_learnable and model.a.requires_grad for model in models):
+        raise ValueError("Every source must learn a.")
     if any(model.L_logits.device != target.device or
            model.L_logits.dtype != target.dtype for model in models):
         raise ValueError("Target and models must share device and dtype.")
@@ -1069,6 +1078,39 @@ def _enumerate(models: nn.ModuleList, target: torch.Tensor,
     return best_pairs, evaluations
 
 
+def set_gain_(model: KarplusStrongFixed, K: float) -> None:
+    """Set a learnable bounded loop gain to K (strictly inside its bounds)."""
+    if not model.gain_min < K < model.gain_max:
+        raise ValueError(f"K={K} is outside the open gain bounds.")
+    unit = (K - model.gain_min) / (model.gain_max - model.gain_min)
+    with torch.no_grad():
+        model.delay_gain.copy_(torch.logit(model.delay_gain.new_tensor(unit)))
+
+
+def _enumerate_gain_grid(models: nn.ModuleList, target: torch.Tensor,
+                         target_spectrum: torch.Tensor, config: TriangleFitConfig,
+                         allowed: list[list[tuple[int, int]]]
+                         ) -> tuple[list[tuple[int, int]], int]:
+    """Best joint (pairs, K) over the gain grid; leaves every source at that K."""
+    best_score, best, evaluations = float("inf"), None, 0
+    for K in config.exhaustive_gain_grid:
+        for model in models:
+            set_gain_(model, K)
+        pairs, count = _enumerate(models, target, target_spectrum, config, allowed)
+        evaluations += count
+        with torch.no_grad():
+            score = float(_loss(_synth(models, config.n_fft, pairs), target_spectrum,
+                                config.spectrum_normalization))
+        print(f"K={K}: best pairs {pairs}, loss {score:.6f}", flush=True)
+        if score < best_score:
+            best_score, best = score, (pairs, K)
+    if best is None:
+        raise ValueError("No finite candidate reconstruction found.")
+    for model in models:
+        set_gain_(model, best[1])
+    return best[0], evaluations
+
+
 def _continuous_parameters(models: nn.ModuleList) -> list[nn.Parameter]:
     return [parameter for model in models for name, parameter in model.named_parameters()
             if parameter.requires_grad and name in {"delay_gain", "a"}]
@@ -1125,7 +1167,8 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                 allowed.append([pair for pair in model.all_pairs() if pair[0] in lengths])
         else:
             allowed = [model.all_pairs() for model in models]
-        pairs, result.search_evaluations = _enumerate(
+        search = _enumerate_gain_grid if config.exhaustive_gain_grid else _enumerate
+        pairs, result.search_evaluations = search(
             models, target, target_spectrum, config, allowed)
         for model, pair in zip(models, pairs):
             model.select_pair(pair)

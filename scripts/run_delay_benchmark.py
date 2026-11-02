@@ -37,15 +37,20 @@ import yaml
 from data.dataset import MatlabPluckData, MatlabTriangleData
 from model.kps.pluck import KarplusStrongPluck, KarplusStrongPluckRelaxation
 from model.kps.triangle import KarplusStrongTriangle, KarplusStrongTriangleRelaxation
-from model.kps.training import TriangleFitConfig, TriangleFitResult, fit_filtered, _pitch_lengths
+from model.kps.training import (TriangleFitConfig, TriangleFitResult, fit_filtered,
+                                _pitch_lengths, set_gain_)
 from diagnostics.gumbel_sampled_surrogate import fit_sampled
 from diagnostics.random_search import fit_random_search
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RANDOM_SEARCH = {"random_search_global": "global", "random_search_local": "local"}
+# Ceiling variants: REINFORCE with K fixed to each source's true K, and exhaustive
+# (L, position) search repeated over the configured exhaustive_K_grid.
+ORACLE_K = {"reinforce_oracle_K": "reinforce"}
+K_GRID = {"exhaustive_K_grid": "exhaustive"}
 METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch",
-           *RANDOM_SEARCH}
+           *RANDOM_SEARCH, *ORACLE_K, *K_GRID}
 METRICS = (
     "rmse",
     "snr_db",
@@ -142,8 +147,9 @@ def read_config(path: Path, overrides: list[str]) -> dict:
     }
     if "sampled_gumbel" in config:
         expected.add("sampled_gumbel")
-    if "random_search" in config:
-        expected.add("random_search")
+    for optional in ("random_search", "exhaustive_K_grid", "target_noise"):
+        if optional in config:
+            expected.add(optional)
     if set(config) != expected:
         raise ValueError(f"Expected configuration keys {sorted(expected)}")
     if not config["methods"] or not set(config["methods"]) <= METHODS:
@@ -162,6 +168,13 @@ def read_config(path: Path, overrides: list[str]) -> dict:
                 or not 0 <= settings["local_probability"] <= 1):
             raise ValueError("random_search requires samples >= 2, local_radius >= 1 "
                              "and local_probability in [0, 1].")
+    if set(config["methods"]) & set(K_GRID) and not config.get("exhaustive_K_grid"):
+        raise ValueError("exhaustive_K_grid needs a nonempty list of K values.")
+    if "target_noise" in config:
+        settings = config["target_noise"]
+        if (set(settings) != {"snr_db"} or type(settings["snr_db"]) not in (int, float)
+                or not math.isfinite(settings["snr_db"])):
+            raise ValueError("target_noise requires a finite snr_db.")
     if not config["datasets"] or not set(config["datasets"]) <= {"comb", "triangle"}:
         raise ValueError("Datasets must be comb and/or triangle.")
     for key in ("methods", "source_counts", "seeds"):
@@ -186,7 +199,9 @@ def read_config(path: Path, overrides: list[str]) -> dict:
 def filtered_config(config: dict, method: str) -> TriangleFitConfig:
     """Validate common settings; sampled Gumbel and random search dispatch separately."""
     shared = "gumbel" if method == "gumbel_sampled" or method in RANDOM_SEARCH else method
-    return TriangleFitConfig(method=shared, **config["fit"])
+    shared = {**ORACLE_K, **K_GRID}.get(method, shared)
+    grid = {"exhaustive_gain_grid": config["exhaustive_K_grid"]} if method in K_GRID else {}
+    return TriangleFitConfig(method=shared, **config["fit"], **grid)
 
 
 def sampled_config(config: dict) -> dict:
@@ -240,7 +255,7 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
         "all_plus": True,
         "all_plus_learnable": True,
         "delay_gain_learnable": True,
-        "random_init": method == "reinforce",
+        "random_init": method in {"reinforce", *ORACLE_K},
     }
     if method == "relaxation":
         initialization = settings.get("relaxation_initialization", "random")
@@ -475,6 +490,33 @@ def evaluate(
     return metrics, matches
 
 
+def add_target_noise(target: torch.Tensor, row: dict, config: dict
+                     ) -> tuple[torch.Tensor, dict]:
+    """White Gaussian noise at snr_db over the fitted first n_fft samples.
+
+    The realization depends only on the case (filter, count, instance), so every
+    method, seed and SNR sees the same noise shape, rescaled per SNR.
+    """
+    snr_db = config["target_noise"]["snr_db"]
+    key = f"{config['selection_seed']}:{row['filter']}:{row['source_count']}:{row['instance']}:noise"
+    generator = torch.Generator().manual_seed(
+        int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little"))
+    noise = torch.randn(target.shape, generator=generator, dtype=target.dtype)
+    window = config["fit"]["n_fft"]
+    signal_power = target[:window].square().mean()
+    noise = noise * (signal_power / 10 ** (snr_db / 10)).sqrt() / noise[:window].square().mean().sqrt()
+    noisy = target + noise
+
+    def snr(segment: slice) -> float:
+        return float(10 * torch.log10(target[segment].square().sum()
+                                      / noise[segment].square().sum()))
+
+    return noisy, {"snr_db": snr_db, "noise_key": key, "noise_std": float(noise.std()),
+                   "fit_window_snr_db": snr(slice(0, window)),
+                   "full_length_snr_db": snr(slice(None)),
+                   "scored_against": "clean stems and clean (L, position) labels"}
+
+
 def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     seed = row["seed"]
     random.seed(seed)
@@ -483,20 +525,32 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     models = make_models(config, row["filter"], row["method"], row["source_count"])
     stems, truth, rate = load_case(row["filter"], paths, config)
     fit_config = filtered_config(config, row["method"])
+    target, noise = stems.sum(0), None
+    if "target_noise" in config:
+        target, noise = add_target_noise(target, row, config)
+        wavfile.write(output / "observed_mixture.wav", rate,
+                      target.numpy().astype(np.float32))
+    if row["method"] in ORACLE_K:
+        # Source i gets target i's true K, held fixed; a, L and position are learned.
+        for model, values in zip(models, truth):
+            set_gain_(model, values["K"])
+            model.delay_gain.requires_grad_(False)
     # Check joint-search cost before expensive synthesis. Pitch uses precisely
     # the same mixture-only peak restriction as the existing implementation.
     search_size = None
-    if row["method"] in {"exhaustive", "pitch"}:
+    if row["method"] in {"exhaustive", "pitch", *K_GRID}:
         pairs = models[0].all_pairs()
         if row["method"] == "pitch":
-            periods = _pitch_lengths(stems.sum(0)[: fit_config.n_fft], models)
+            periods = _pitch_lengths(target[: fit_config.n_fft], models)
             pairs = [pair for pair in pairs if pair[0] in {lag - 1 for lag in periods}]
         search_size = len(pairs) ** len(models)
+        # The cap applies per K; search_size reports the whole grid.
         if search_size > fit_config.exhaustive_cap:
             raise SearchCapExceeded(
                 f"Joint search requires {search_size} evaluations; "
                 f"cap is {fit_config.exhaustive_cap}."
             )
+        search_size *= max(len(fit_config.exhaustive_gain_grid), 1)
     initial = synthesize(models, stems.shape[-1]).sum(0)
     wavfile.write(
         output / "initial_mixture.wav", rate, initial.numpy().astype(np.float32)
@@ -506,7 +560,7 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     if row["method"] == "gumbel_sampled":
         (output / "sampled_progress.jsonl").write_text("")
         history, source_syntheses = fit_sampled(
-            models, stems.sum(0), sampled_config(config),
+            models, target, sampled_config(config),
             "dp" if row["filter"] == "comb" else "A", output / "sampled_progress.jsonl")
         result = TriangleFitResult(
             pairs=[model.selected_delays() for model in models],
@@ -518,7 +572,7 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     elif row["method"] in RANDOM_SEARCH:
         (output / "search_progress.jsonl").write_text("")
         history, source_syntheses = fit_random_search(
-            models, stems.sum(0), random_search_config(config, row["method"]),
+            models, target, random_search_config(config, row["method"]),
             output / "search_progress.jsonl")
         result = TriangleFitResult(
             pairs=[model.selected_delays() for model in models],
@@ -529,7 +583,7 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
         write_json(output / "search_history.json", history)
     else:
         result = fit_filtered(
-            models, stems.sum(0), fit_config,
+            models, target, fit_config,
             "dp" if row["filter"] == "comb" else "A", json.loads(row["indices"]))
     fit_seconds = time.perf_counter() - start
     models.eval()
@@ -569,6 +623,8 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             "random_search_config": (random_search_config(config, row["method"])
                                      if row["method"] in RANDOM_SEARCH else None),
             "training_source_syntheses": source_syntheses,
+            "target_noise": noise,
+            "oracle": {"reinforce_oracle_K": "K fixed to each source's true K"}.get(row["method"]),
             "estimator": {"gumbel_sampled": "biased top-K support under factorized Gumbel perturbations",
                           "random_search_global": "incumbent plus uniform joint redraws",
                           "random_search_local": "incumbent plus one-source redraws/local moves",
