@@ -14,6 +14,9 @@ class KarplusStrongPluck(KarplusStrongFixed):
 
     The MATLAB generator uses input -K * (delta[n] - delta[n-dp]) and
     feedback +K * y[n-L]. Candidate pairs with dp >= L are excluded.
+    ``output_gain_learnable`` adds an output (loudness) gain g = exp(log_output_gain),
+    initialized to 1, for targets whose level K cannot match (real audio). Off,
+    the output is exactly the MATLAB model (g = 1).
     """
 
     def __init__(
@@ -22,6 +25,7 @@ class KarplusStrongPluck(KarplusStrongFixed):
         delay_len_max: int,
         dp_min: int,
         dp_max: int,
+        output_gain_learnable: bool = False,
         **kwargs,
     ) -> None:
         if delay_len_min < 1 or delay_len_min >= delay_len_max:
@@ -41,6 +45,12 @@ class KarplusStrongPluck(KarplusStrongFixed):
             nn.init.uniform_(self.L_logits, -1e-3, 1e-3)
             nn.init.uniform_(self.dp_logits, -1e-3, 1e-3)
         self.fixed_L: int | None = None
+        if output_gain_learnable:
+            self.log_output_gain = nn.Parameter(torch.zeros(()))
+
+    def output_gain(self) -> torch.Tensor | float:
+        gain = getattr(self, "log_output_gain", None)
+        return 1.0 if gain is None else gain.exp()
 
     def _joint_logits(self) -> torch.Tensor:
         logits = self.L_logits[:, None] + self.dp_logits[None, :]
@@ -186,7 +196,8 @@ class KarplusStrongPluck(KarplusStrongFixed):
         z = self.z
         numerator = a / 2 + (a + 1) / 2 * z.pow(-1) + 0.5 * z.pow(-2)
         denominator = 1 + a * z.pow(-1) - K * numerator * z.pow(-delay_len)
-        return -K * (1 - z.pow(-dp)) * numerator / denominator
+        response = -K * (1 - z.pow(-dp)) * numerator / denominator
+        return response * self.output_gain() if hasattr(self, "log_output_gain") else response
 
     def time_domain_synth(
         self,
@@ -212,9 +223,10 @@ class KarplusStrongPluck(KarplusStrongFixed):
         denominator[0] = 1
         denominator[1] = a
         denominator[L:L + 3] -= K * numerator
-        return torchaudio.functional.lfilter(
+        output = torchaudio.functional.lfilter(
             excitation, denominator, b, clamp=False
         )
+        return output * self.output_gain() if hasattr(self, "log_output_gain") else output
 
 
 class KarplusStrongPluckRelaxation(ContinuousDelayPairMixin, KarplusStrongPluck):

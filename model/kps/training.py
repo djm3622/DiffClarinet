@@ -917,7 +917,7 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         raise ValueError("Expected nonempty models and a one-dimensional long target.")
     if any(model.n_fft != config.n_fft for model in models):
         raise ValueError("Model and training FFT lengths must match.")
-    if len(_continuous_parameters(models)) != 2 * len(models):
+    if not _learns_K_and_a(models):
         raise ValueError("Every source must learn both K and a.")
     if any(model.L_logits.device != target.device or
            model.L_logits.dtype != target.dtype for model in models):
@@ -1070,8 +1070,14 @@ def _enumerate(models: nn.ModuleList, target: torch.Tensor,
 
 
 def _continuous_parameters(models: nn.ModuleList) -> list[nn.Parameter]:
+    """K and a, plus the optional output gain (real audio); never the delays."""
     return [parameter for model in models for name, parameter in model.named_parameters()
-            if parameter.requires_grad and name in {"delay_gain", "a"}]
+            if parameter.requires_grad and name in {"delay_gain", "a", "log_output_gain"}]
+
+
+def _learns_K_and_a(models: nn.ModuleList) -> bool:
+    return all(sum(name in {"delay_gain", "a"} and parameter.requires_grad
+                   for name, parameter in model.named_parameters()) == 2 for model in models)
 
 
 def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
@@ -1099,7 +1105,7 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
         raise ValueError("Expected nonempty models and a one-dimensional long target.")
     if any(model.n_fft != config.n_fft for model in models):
         raise ValueError("Model and training FFT lengths must match.")
-    if len(_continuous_parameters(models)) != 2 * len(models):
+    if not _learns_K_and_a(models):
         raise ValueError("Every source must learn both K and a.")
     if any(model.L_logits.device != target.device or
            model.L_logits.dtype != target.dtype for model in models):

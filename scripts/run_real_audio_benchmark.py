@@ -125,6 +125,7 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
         L, dp = model.selected_delays()
         a = float(model.scaled_allplus().detach())
         estimates.append({"L": L, "dp": dp, "K": float(model.scaled_gain().detach()), "a": a,
+                          "output_gain": float(model.output_gain()),
                           "pitch_hz": loop_pitch(L, a, rate)})
     references = [note["f0_hz"] for note in notes]
     metrics.update({k: v for k, v in pitch_metrics([e["pitch_hz"] for e in estimates],
