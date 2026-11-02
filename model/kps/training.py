@@ -9,7 +9,7 @@ phase two freezes the delays and refines K and a against causal audio."""
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import product
-from math import prod
+from math import log, prod
 
 import torch
 from torch import fft, optim
@@ -807,8 +807,8 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none"}:
-            raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
+        if self.spectrum_normalization not in {"peak", "none", "noise_floor"}:
+            raise ValueError("Spectrum normalization must be 'peak', 'none' or 'noise_floor'.")
         if self.print_frequency < 1:
             raise ValueError("Print frequency must be positive.")
         if self.prior_anneal_epochs < 1:
@@ -1014,11 +1014,28 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
     return result
 
 
+def noise_floor_power(target_spectrum: torch.Tensor) -> torch.Tensor:
+    """White-noise power per bin estimated from the target alone.
+
+    Bins below the 10th percentile of |Y|^2 are taken to be noise. For complex
+    Gaussian noise |Y|^2 is exponential, whose 10th percentile is -ln(0.9) N.
+    """
+    power = target_spectrum.abs().square()
+    return torch.quantile(power, 0.1) / -log(0.9)
+
+
 def _triangle_spectral_loss(prediction: torch.Tensor,
                             target_spectrum: torch.Tensor,
                             normalization: str) -> torch.Tensor:
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
+    if normalization == "noise_floor":
+        # Prediction plus the estimated noise power against the observed target,
+        # so troughs that noise fills in do not dominate the log-spectral error.
+        floor = noise_floor_power(target_spectrum).detach()
+        return 5 * (torch.log10(prediction.abs().square() + floor)
+                    - torch.log10(target_spectrum.abs().square().clamp_min(1e-30))
+                    ).abs().mean()
     return (to_log_mag(prediction, rel_to_max=False)
             - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
 

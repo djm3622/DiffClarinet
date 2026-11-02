@@ -10,7 +10,8 @@ import torch
 from scipy.io import wavfile
 from torch import nn
 
-from model.kps.training import TriangleFitConfig, _synth, fit_filtered, set_gain_
+from model.kps.training import (TriangleFitConfig, _synth, _triangle_spectral_loss, fit_filtered,
+                                noise_floor_power, set_gain_)
 from scripts import run_delay_benchmark as benchmark
 from tests.test_filtered_fitting import make_source
 
@@ -113,6 +114,17 @@ class PaperControlTests(unittest.TestCase):
         scale = observed[20][0].norm() / observed[40][0].norm()
         self.assertTrue(torch.allclose(observed[20][0], observed[40][0] * scale, atol=1e-6))
         self.assertAlmostEqual(float(scale), 10.0, places=3)
+
+    def test_noise_floor_estimates_white_noise_power(self) -> None:
+        generator = torch.Generator().manual_seed(0)
+        noise = torch.randn(8192, generator=generator, dtype=torch.float64)
+        spectrum = torch.fft.rfft(noise)
+        self.assertAlmostEqual(float(noise_floor_power(spectrum)) / 8192, 1.0, delta=0.15)
+        # Noise only: a silent prediction plus the floor is already close.
+        silent = _triangle_spectral_loss(torch.zeros_like(spectrum), spectrum, "noise_floor")
+        none = _triangle_spectral_loss(torch.zeros_like(spectrum), spectrum, "none")
+        self.assertLess(float(silent), 4.0)
+        self.assertGreater(float(none), float(silent))
 
 
 if __name__ == "__main__":
