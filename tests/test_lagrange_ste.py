@@ -13,6 +13,8 @@ from model.kps.training import fit_filtered
 from scripts import run_delay_benchmark as benchmark
 
 CONFIG = benchmark.ROOT / "configs/delay_benchmark_lagrange_ste.yaml"
+RANDOM_INIT = benchmark.ROOT / "configs/delay_benchmark_lagrange_ste_random_init.yaml"
+PITCH_GIVEN = benchmark.ROOT / "configs/delay_benchmark_lagrange_pitch_given.yaml"
 
 
 def model(kind: str, method: str = "lagrange", dtype=torch.float64):
@@ -124,6 +126,44 @@ class LagrangeSTETest(unittest.TestCase):
                                     for k in benchmark.METRICS))
                 self.assertEqual(summary["fit_config"]["method"], method)
                 self.assertEqual(summary["relaxation_parameters"], ["L", "position"])
+
+    def test_paper_config_plan_sizes(self):
+        for path, size, methods in ((RANDOM_INIT, 560, {"lagrange", "round_ste"}),
+                                    (PITCH_GIVEN, 140, {"lagrange_pitch_given"})):
+            plan, _ = benchmark.make_plan(benchmark.read_config(path, []))
+            self.assertEqual(len(plan), size)
+            self.assertEqual({row["method"] for row in plan}, methods)
+
+    def test_random_initialization_is_seeded_and_breaks_symmetry(self):
+        config = benchmark.read_config(RANDOM_INIT, [])
+        for kind in ("comb", "triangle"):
+            for method in ("lagrange", "round_ste"):
+                draws = []
+                for _ in range(2):
+                    torch.manual_seed(1)
+                    models = benchmark.make_models(config, kind, method, 3)
+                    draws.append([(float(m.delay_len_parameter), float(m.position_parameter))
+                                  for m in models])
+                self.assertEqual(draws[0], draws[1])
+                self.assertEqual(len(set(draws[0])), 3)
+                for m in models:
+                    L, position = m.selected_delays()
+                    self.assertTrue(100 <= L <= 200 and 1 <= position < L, (L, position))
+
+    def test_pitch_given_fit_keeps_true_L(self):
+        for kind in ("comb", "triangle"):
+            config = benchmark.read_config(
+                PITCH_GIVEN, ["fit.epochs=3", "fit.refine_epochs=2"])
+            plan, inventories = benchmark.make_plan(config)
+            row = next(r for r in plan if r["filter"] == kind and r["source_count"] == 2)
+            paths = [inventories[kind][i] for i in json.loads(row["indices"])]
+            with tempfile.TemporaryDirectory() as directory:
+                benchmark.fit_case(row, config, paths, Path(directory))
+                summary = json.loads((Path(directory) / "summary.json").read_text())
+            self.assertEqual(summary["fit_config"]["method"], "lagrange_pitch_given")
+            self.assertEqual(summary["relaxation_parameters"], ["position"])
+            for source in summary["matched_sources"]:
+                self.assertEqual(source["L_mae"], 0)
 
 
 def _synth_with(m, L, position):

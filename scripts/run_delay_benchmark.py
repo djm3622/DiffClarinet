@@ -45,10 +45,12 @@ from diagnostics.gumbel_sampled_surrogate import fit_sampled
 
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = {"reinforce", "gumbel", "gumbel_sampled", "relaxation", "exhaustive", "pitch",
-           "lagrange", "round_ste"}
+           "lagrange", "round_ste", "lagrange_pitch_given"}
 # Methods whose L and position are continuous parameters, by model family.
 CONTINUOUS_DELAY_FAMILIES = {"relaxation": "relaxation", "lagrange": "lagrange",
-                             "round_ste": "lagrange"}
+                             "round_ste": "lagrange", "lagrange_pitch_given": "lagrange"}
+# Oracle pitch: L is fixed to each source's true loop delay; only position, K and a learn.
+PITCH_GIVEN = {"lagrange_pitch_given": "lagrange"}
 METRICS = (
     "rmse",
     "snr_db",
@@ -178,8 +180,8 @@ def read_config(path: Path, overrides: list[str]) -> dict:
 
 def filtered_config(config: dict, method: str) -> TriangleFitConfig:
     """Validate common settings; sampled Gumbel has a separate benchmark dispatch."""
-    return TriangleFitConfig(method="gumbel" if method == "gumbel_sampled" else method,
-                             **config["fit"])
+    shared = "gumbel" if method == "gumbel_sampled" else PITCH_GIVEN.get(method, method)
+    return TriangleFitConfig(method=shared, **config["fit"])
 
 
 def sampled_config(config: dict) -> dict:
@@ -466,6 +468,16 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     models = make_models(config, row["filter"], row["method"], row["source_count"])
     stems, truth, rate = load_case(row["filter"], paths, config)
     fit_config = filtered_config(config, row["method"])
+    if row["method"] in PITCH_GIVEN:
+        # Source i gets target i's true L; position is redrawn below that L.
+        settings = config["model"]
+        with torch.no_grad():
+            for model, values in zip(models, truth):
+                model.delay_len_parameter.fill_(values["L"])
+                model.delay_len_parameter.requires_grad_(False)
+                model.position_parameter.uniform_(
+                    settings["position_min"],
+                    min(settings["position_max"], values["L"] - 1))
     # Check joint-search cost before expensive synthesis. Pitch uses precisely
     # the same mixture-only peak restriction as the existing implementation.
     search_size = None
@@ -545,8 +557,9 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
             "search_evaluations": result.search_evaluations,
             "search_size": search_size,
             "fit_domain": "finite_causal_first_n_fft",
-            "relaxation_parameters": (["L", "position"] if row["method"] in CONTINUOUS_DELAY_FAMILIES
-                                      else None),
+            "relaxation_parameters": (["position"] if row["method"] in PITCH_GIVEN
+                                      else ["L", "position"]
+                                      if row["method"] in CONTINUOUS_DELAY_FAMILIES else None),
             "evaluation_domain": "full_causal_audio",
             "audio_format": "float32 WAV, original amplitudes, no peak normalization",
             "position_parameter": "dp" if row["filter"] == "comb" else "A",

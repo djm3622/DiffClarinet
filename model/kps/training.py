@@ -1152,10 +1152,12 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
             continuous += [parameter for model in models for parameter in
                            (model.delay_len_parameter, model.position_parameter)]
         elif method in LAGRANGE_METHODS:
-            # Ordinary gradients for L, position, K and a through causal synthesis.
+            # Ordinary gradients for L, position, K and a through causal synthesis;
+            # a frozen L (oracle pitch) is left out.
             discrete = []
             continuous += [parameter for model in models for parameter in
-                           (model.delay_len_parameter, model.position_parameter)]
+                           (model.delay_len_parameter, model.position_parameter)
+                           if parameter.requires_grad]
         else:
             discrete = [parameter for model in models for parameter in
                         (model.L_logits, getattr(model, second_name))]
