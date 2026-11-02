@@ -34,6 +34,12 @@ class PaperControlTests(unittest.TestCase):
         for path in NOISE.values():
             plan, _ = benchmark.make_plan(benchmark.read_config(path, []))
             self.assertEqual(len(plan), 90)
+        for snr in NOISE:
+            path = benchmark.ROOT / f"configs/delay_benchmark_noise_exhaustive_snr{snr}.yaml"
+            config = benchmark.read_config(path, [])
+            plan, _ = benchmark.make_plan(config)
+            self.assertEqual(len(plan), 64)
+            self.assertEqual(config["target_noise"]["snr_db"], snr)
 
     def test_set_gain_round_trip(self) -> None:
         source = make_source("dp")
