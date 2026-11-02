@@ -1,0 +1,59 @@
+# Lagrange fractional delays and rounded straight-through delays on all 32 k05 cases,
+# seeds 0-4. Each source draws L and position independently from the relaxation
+# pair-random distribution (seeded); K, a fixed. Instances 0-9 of seeds 0-1 already ran
+# under delay_benchmark_lagrange_ste_random_init.yaml.
+output_dir: output/delay_benchmark_lagrange_ste_random_init_full
+datasets:
+  comb: data/vary_all_pluck
+  triangle: data/vary_all_triangle
+methods:
+- lagrange
+- round_ste
+source_counts:
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  relaxation_initialization: random
+  initial_position: null
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 1000
+  show_progress: false
+workers: 1
