@@ -1,6 +1,8 @@
 """Small controls for the matched-budget random-search baseline."""
 
 from itertools import product
+import json
+import random
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ from torch import nn
 
 from diagnostics.random_search import fit_random_search, propose
 from model.kps.training import _synth
+from scripts import run_delay_benchmark as benchmark
 from tests.test_filtered_fitting import make_source
 
 
@@ -50,6 +53,18 @@ class RandomSearchTests(unittest.TestCase):
                     for parameter in model.parameters():
                         if parameter.grad is not None:
                             self.assertTrue(torch.isfinite(parameter.grad).all())
+
+    def test_i10_config_reuses_k05_cases(self) -> None:
+        config = benchmark.read_config(
+            benchmark.ROOT / "configs/delay_benchmark_random_search_i10.yaml", [])
+        plan, inventories = benchmark.make_plan(config)
+        self.assertEqual(len(plan), 140)
+        self.assertEqual({row["method"] for row in plan}, {"random_search_local"})
+        for row in plan:
+            count, i = row["source_count"], row["instance"]
+            k05 = random.Random(f"1729:{row['filter']}:{count}").sample(
+                range(len(inventories[row["filter"]])), 32 * count)
+            self.assertEqual(json.loads(row["indices"]), sorted(k05[i * count:(i + 1) * count]))
 
 
 if __name__ == "__main__":
