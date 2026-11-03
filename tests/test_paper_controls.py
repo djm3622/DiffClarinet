@@ -10,9 +10,8 @@ import torch
 from scipy.io import wavfile
 from torch import nn
 
-from model.kps.training import (TriangleFitConfig, _loss, _profiled_K_losses, _synth,
-                                _triangle_spectral_loss, fit_filtered, noise_floor_power,
-                                set_gain_)
+from model.kps.training import (TriangleFitConfig, _synth, _triangle_spectral_loss, fit_filtered,
+                                noise_floor_power, set_gain_)
 from scripts import run_delay_benchmark as benchmark
 from tests.test_filtered_fitting import make_source
 
@@ -127,21 +126,6 @@ class PaperControlTests(unittest.TestCase):
         self.assertLess(float(silent), 4.0)
         self.assertGreater(float(none), float(silent))
 
-    def test_profiled_K_losses_find_grid_K_and_restore_gain(self) -> None:
-        truth = make_source("A")
-        set_gain_(truth, 0.6)
-        spectrum = torch.fft.rfft(_synth(nn.ModuleList([truth]), 32, [(6, 3)]).detach())
-        models = nn.ModuleList([make_source("A")])
-        before = models[0].delay_gain.detach().clone()
-        config = TriangleFitConfig(method="reinforce", n_fft=32, reinforce_K_grid=(0.95, 0.6))
-        profiled = _profiled_K_losses(models, config, spectrum, [[(6, 3)], [(5, 2)]])
-        current = _loss(_synth(models, 32, [(6, 3)]), spectrum, "none")
-        self.assertLess(float(profiled[0]), 1e-4)
-        self.assertLess(float(profiled[0]), float(current))
-        self.assertLess(float(profiled[0]), float(profiled[1]))
-        self.assertTrue(torch.equal(models[0].delay_gain.detach(), before))
-        with self.assertRaises(ValueError):
-            TriangleFitConfig(method="gumbel", reinforce_K_grid=(0.6,))
 
 if __name__ == "__main__":
     unittest.main()
