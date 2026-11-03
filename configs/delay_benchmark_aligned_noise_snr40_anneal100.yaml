@@ -1,4 +1,4 @@
-# Gradient-friendly noise losses at 40 dB, triangle, REINFORCE and sampled Gumbel, n = 1-3,
+# Gradient-friendly noise losses at 40 dB, triangle, REINFORCE and sampled Gumbel, n = 1, 2, 3, 5, 7,
 # all 32 k05 cases, seed 0: option 3: noise_floor with the floor annealed from 100x to 1x over phase 1.
 # Paired with delay_benchmark_aligned_noise_snr40_{none,noise_floor}.yaml (same cases, init, noise).
 output_dir: output/delay_benchmark_aligned_noise_snr40_anneal100
@@ -11,6 +11,8 @@ source_counts:
 - 1
 - 2
 - 3
+- 5
+- 7
 seeds:
 - 0
 instances: 32
