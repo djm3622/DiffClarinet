@@ -218,6 +218,7 @@ def sampled_config(config: dict) -> dict:
         "prior_end": fit["final_uniform_prior_weight"],
         "smoothness": fit["ordinal_smoothness_weight"],
         "spectrum_normalization": fit["spectrum_normalization"],
+        "noise_floor_anneal": fit.get("noise_floor_anneal", 1.0),
         "log_every": fit["print_frequency"],
     }
 

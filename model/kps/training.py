@@ -797,6 +797,8 @@ class TriangleFitConfig:
     show_progress: bool = False
     # Exhaustive only: also search K jointly over this grid (a stays at its value).
     exhaustive_gain_grid: tuple[float, ...] = ()
+    # Phase-1 floor multiplier for noise_floor losses, annealed geometrically to 1.
+    noise_floor_anneal: float = 1.0
 
     def __post_init__(self) -> None:
         if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
@@ -807,8 +809,14 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none", "noise_floor"}:
-            raise ValueError("Spectrum normalization must be 'peak', 'none' or 'noise_floor'.")
+        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt"}:
+            raise ValueError("Spectrum normalization must be 'peak', 'none', 'noise_floor' "
+                             "or 'noise_floor_sqrt'.")
+        if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
+                self.spectrum_normalization.startswith("noise_floor")
+                and self.method in {"reinforce", "gumbel"})):
+            raise ValueError("noise_floor_anneal >= 1; above 1 it needs a noise_floor loss "
+                             "and REINFORCE or Gumbel.")
         if self.print_frequency < 1:
             raise ValueError("Print frequency must be positive.")
         if self.prior_anneal_epochs < 1:
@@ -952,10 +960,11 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         samples = [model.sample_pairs(config.reinforce_samples)
                    if position == "A" else model.sample_delay_pairs(config.reinforce_samples)
                    for model in models]
+        floor_scale = noise_floor_scale(epoch_index, config)
         losses = torch.stack([
             _loss(_synth(models, config.n_fft,
                          [source[0][i] for source in samples]),
-                  target_spectrum, config.spectrum_normalization)
+                  target_spectrum, config.spectrum_normalization, floor_scale)
             for i in range(config.reinforce_samples)
         ])
         detached = losses.detach()
@@ -1024,26 +1033,37 @@ def noise_floor_power(target_spectrum: torch.Tensor) -> torch.Tensor:
     return torch.quantile(power, 0.1) / -log(0.9)
 
 
+def noise_floor_scale(epoch_index: int, config: "TriangleFitConfig") -> float:
+    """Floor multiplier for phase 1: geometric from noise_floor_anneal down to 1."""
+    progress = min(epoch_index / max(config.epochs - 1, 1), 1.0)
+    return config.noise_floor_anneal ** (1.0 - progress)
+
+
 def _triangle_spectral_loss(prediction: torch.Tensor,
                             target_spectrum: torch.Tensor,
-                            normalization: str) -> torch.Tensor:
+                            normalization: str,
+                            floor_scale: float = 1.0) -> torch.Tensor:
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
-    if normalization == "noise_floor":
+    if normalization in {"noise_floor", "noise_floor_sqrt"}:
         # Prediction plus the estimated noise power against the observed target,
-        # so troughs that noise fills in do not dominate the log-spectral error.
+        # so troughs that noise fills in do not dominate the error. A floor_scale
+        # above 1 adds the extra floor to both sides, comparing only the peaks.
         floor = noise_floor_power(target_spectrum).detach()
-        return 5 * (torch.log10(prediction.abs().square() + floor)
-                    - torch.log10(target_spectrum.abs().square().clamp_min(1e-30))
-                    ).abs().mean()
+        predicted = prediction.abs().square() + floor_scale * floor
+        observed = (target_spectrum.abs().square() + (floor_scale - 1) * floor).clamp_min(1e-30)
+        if normalization == "noise_floor_sqrt":
+            return ((predicted.sqrt() - observed.sqrt()).abs().mean()
+                    / target_spectrum.abs().mean())
+        return 5 * (torch.log10(predicted) - torch.log10(observed)).abs().mean()
     return (to_log_mag(prediction, rel_to_max=False)
             - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
 
 
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
-          normalization: str) -> torch.Tensor:
+          normalization: str, floor_scale: float = 1.0) -> torch.Tensor:
     return _triangle_spectral_loss(torch.fft.rfft(prediction),
-                                   target_spectrum, normalization)
+                                   target_spectrum, normalization, floor_scale)
 
 
 def _pitch_lengths(audio: torch.Tensor, models: nn.ModuleList) -> list[int]:
@@ -1242,11 +1262,13 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                     surrogate_parts.append(surrogate)
                 causal_spectrum = torch.stack(causal_parts).sum(0)
                 surrogate_spectrum = torch.stack(surrogate_parts).sum(0)
+                floor_scale = noise_floor_scale(epoch_index, config)
                 measured = _triangle_spectral_loss(
-                    causal_spectrum, target_spectrum, config.spectrum_normalization)
+                    causal_spectrum, target_spectrum, config.spectrum_normalization,
+                    floor_scale)
                 objective = _triangle_spectral_loss(
                     causal_spectrum + (surrogate_spectrum - surrogate_spectrum.detach()),
-                    target_spectrum, config.spectrum_normalization)
+                    target_spectrum, config.spectrum_normalization, floor_scale)
             else:
                 pairs = [model.selected_delays() for model in models]
                 causal = torch.fft.rfft(_synth(models, config.n_fft, pairs))

@@ -11,7 +11,7 @@ from scipy.io import wavfile
 from torch import nn
 
 from model.kps.training import (TriangleFitConfig, _synth, _triangle_spectral_loss, fit_filtered,
-                                noise_floor_power, set_gain_)
+                                noise_floor_power, noise_floor_scale, set_gain_)
 from scripts import run_delay_benchmark as benchmark
 from tests.test_filtered_fitting import make_source
 
@@ -125,6 +125,31 @@ class PaperControlTests(unittest.TestCase):
         none = _triangle_spectral_loss(torch.zeros_like(spectrum), spectrum, "none")
         self.assertLess(float(silent), 4.0)
         self.assertGreater(float(none), float(silent))
+
+    def test_noise_floor_scale_and_sqrt_variant(self) -> None:
+        generator = torch.Generator().manual_seed(1)
+        target = torch.fft.rfft(torch.randn(8192, generator=generator, dtype=torch.float64))
+        prediction = torch.fft.rfft(torch.randn(8192, generator=generator, dtype=torch.float64))
+        floor = noise_floor_power(target)
+        explicit = 5 * (torch.log10(prediction.abs().square() + floor)
+                        - torch.log10(target.abs().square())).abs().mean()
+        self.assertAlmostEqual(float(_triangle_spectral_loss(prediction, target, "noise_floor")),
+                               float(explicit), places=10)
+        # A larger floor hides more of the spectrum, so the same mismatch costs less.
+        scaled = [float(_triangle_spectral_loss(prediction, target, mode, scale))
+                  for mode in ("noise_floor", "noise_floor_sqrt") for scale in (1.0, 100.0)]
+        self.assertGreater(scaled[0], scaled[1])
+        self.assertGreater(scaled[2], scaled[3])
+        config = TriangleFitConfig(method="reinforce", epochs=11, spectrum_normalization="noise_floor",
+                                   noise_floor_anneal=100.0)
+        self.assertAlmostEqual(noise_floor_scale(0, config), 100.0)
+        self.assertAlmostEqual(noise_floor_scale(5, config), 10.0)
+        self.assertAlmostEqual(noise_floor_scale(10, config), 1.0)
+        for bad in (dict(method="reinforce", noise_floor_anneal=10.0),
+                    dict(method="exhaustive", spectrum_normalization="noise_floor", noise_floor_anneal=10.0),
+                    dict(method="reinforce", spectrum_normalization="noise_floor", noise_floor_anneal=0.5)):
+            with self.assertRaises(ValueError):
+                TriangleFitConfig(**bad)
 
 
 if __name__ == "__main__":
