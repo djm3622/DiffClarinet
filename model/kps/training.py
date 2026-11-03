@@ -797,6 +797,9 @@ class TriangleFitConfig:
     show_progress: bool = False
     # Exhaustive only: also search K jointly over this grid (a stays at its value).
     exhaustive_gain_grid: tuple[float, ...] = ()
+    # REINFORCE only: score each sampled assignment at its best shared K over this
+    # grid (and the current K) when forming advantages; K itself is still learned.
+    reinforce_K_grid: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.method not in {"reinforce", "gumbel", "exhaustive", "pitch", "relaxation"}:
@@ -807,6 +810,12 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
+        object.__setattr__(self, "reinforce_K_grid", tuple(self.reinforce_K_grid))
+        if self.reinforce_K_grid and (
+                self.method != "reinforce"
+                or len(set(self.reinforce_K_grid)) != len(self.reinforce_K_grid)
+                or not all(0 < K < 1 for K in self.reinforce_K_grid)):
+            raise ValueError("A REINFORCE K grid needs REINFORCE and distinct K in (0, 1).")
         if self.spectrum_normalization not in {"peak", "none", "noise_floor"}:
             raise ValueError("Spectrum normalization must be 'peak', 'none' or 'noise_floor'.")
         if self.print_frequency < 1:
@@ -959,6 +968,10 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
             for i in range(config.reinforce_samples)
         ])
         detached = losses.detach()
+        if config.reinforce_K_grid:
+            detached = torch.minimum(detached, _profiled_K_losses(
+                models, config, target_spectrum,
+                [[source[0][i] for source in samples] for i in range(config.reinforce_samples)]))
         baseline = (detached.sum() - detached) / (config.reinforce_samples - 1)
         advantage = (detached - baseline) / (detached - baseline).std(
             unbiased=False).clamp_min(1e-6)
@@ -1022,6 +1035,27 @@ def noise_floor_power(target_spectrum: torch.Tensor) -> torch.Tensor:
     """
     power = target_spectrum.abs().square()
     return torch.quantile(power, 0.1) / -log(0.9)
+
+
+def _profiled_K_losses(models: nn.ModuleList, config: TriangleFitConfig,
+                       target_spectrum: torch.Tensor,
+                       assignments: list[list[tuple[int, int]]]) -> torch.Tensor:
+    """Each assignment's loss minimized over a K shared by all sources, no gradient.
+
+    The current K values are restored afterwards; a is held at its current value.
+    """
+    saved = [model.delay_gain.detach().clone() for model in models]
+    best = torch.full((len(assignments),), float("inf"), dtype=target_spectrum.real.dtype)
+    with torch.no_grad():
+        for K in config.reinforce_K_grid:
+            for model in models:
+                set_gain_(model, K)
+            best = torch.minimum(best, torch.stack([
+                _loss(_synth(models, config.n_fft, pairs), target_spectrum,
+                      config.spectrum_normalization) for pairs in assignments]))
+        for model, value in zip(models, saved):
+            model.delay_gain.copy_(value)
+    return best
 
 
 def _triangle_spectral_loss(prediction: torch.Tensor,
