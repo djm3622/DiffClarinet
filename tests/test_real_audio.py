@@ -37,6 +37,22 @@ class RealAudioTests(unittest.TestCase):
             self.assertEqual(len(summary["matched_sources"]), 2)
             self.assertTrue(0 <= summary["metrics"]["f1_50c"] <= 1)
 
+    def test_triangle_config_matches_comb_plan_and_fits(self) -> None:
+        comb = real.read_config(real.benchmark.ROOT / "configs/real_audio_nsynth_guitar_gain.yaml", [])
+        triangle = real.read_config(
+            real.benchmark.ROOT / "configs/real_audio_nsynth_guitar_triangle_gain.yaml",
+            ["fit.epochs=3", "fit.refine_epochs=2"])
+        self.assertEqual([r["notes"] for r in real.make_plan(comb)],
+                         [r["notes"] for r in real.make_plan(triangle)])
+        for method in triangle["methods"]:
+            row = next(r for r in real.make_plan(triangle)
+                       if r["source_count"] == 2 and r["method"] == method)
+            with tempfile.TemporaryDirectory() as directory:
+                summary = real.fit_case(row, triangle, Path(directory))
+            self.assertEqual(len(summary["matched_sources"]), 2)
+            self.assertIn("A", summary["matched_sources"][0])
+            self.assertTrue(0 <= summary["metrics"]["f1_50c"] <= 1)
+
 
 if __name__ == "__main__":
     unittest.main()

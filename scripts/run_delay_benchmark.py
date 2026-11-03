@@ -263,8 +263,8 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
     if settings.get("output_gain", "fixed") not in {"fixed", "learned"}:
         raise ValueError("output_gain must be fixed or learned")
     if settings.get("output_gain") == "learned":
-        if kind != "comb" or method == "relaxation":
-            raise ValueError("A learned output gain is implemented for the comb integer-pair model.")
+        if method == "relaxation":
+            raise ValueError("A learned output gain is implemented for the integer-pair models.")
         kwargs["output_gain_learnable"] = True
     if method == "relaxation":
         initialization = settings.get("relaxation_initialization", "random")

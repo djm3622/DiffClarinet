@@ -6,22 +6,29 @@ import torch
 from torch import nn
 
 from model.kps.pluck import KarplusStrongPluck
+from model.kps.triangle import KarplusStrongTriangle
 from model.kps.training import TriangleFitConfig, _continuous_parameters, _synth, fit_filtered
 from diagnostics.random_search import fit_random_search
 from diagnostics.gumbel_sampled_surrogate import fit_sampled
 
 
-def source(gain: bool) -> KarplusStrongPluck:
+def source(gain: bool, position: str = "dp") -> KarplusStrongPluck | KarplusStrongTriangle:
     torch.manual_seed(3)
-    return KarplusStrongPluck(delay_len_min=5, delay_len_max=6, dp_min=1, dp_max=4, n_fft=32,
-                              all_plus=True, all_plus_learnable=True, delay_gain_learnable=True,
-                              delay_gain=0.8, a=0.2, random_init=False,
-                              output_gain_learnable=gain)
+    kind, bounds = ((KarplusStrongPluck, dict(dp_min=1, dp_max=4)) if position == "dp"
+                    else (KarplusStrongTriangle, dict(A_min=1, A_max=4)))
+    return kind(delay_len_min=5, delay_len_max=6, n_fft=32, all_plus=True,
+                all_plus_learnable=True, delay_gain_learnable=True, delay_gain=0.8, a=0.2,
+                random_init=False, output_gain_learnable=gain, **bounds)
 
 
 class OutputGainTests(unittest.TestCase):
     def test_off_has_no_parameter_and_on_starts_identical(self) -> None:
-        off, on = source(False), source(True)
+        for position in ("dp", "A"):
+            with self.subTest(position=position):
+                self._check_off_and_on(position)
+
+    def _check_off_and_on(self, position: str) -> None:
+        off, on = source(False, position), source(True, position)
         self.assertFalse(hasattr(off, "log_output_gain"))
         self.assertEqual(off.output_gain(), 1.0)
         one = torch.ones(1)
@@ -33,13 +40,18 @@ class OutputGainTests(unittest.TestCase):
         self.assertEqual(len(_continuous_parameters(nn.ModuleList([on]))), 3)
 
     def test_gain_scales_output_and_is_learned(self) -> None:
-        truth = source(False)
+        for position in ("dp", "A"):
+            with self.subTest(position=position):
+                self._check_learned(position)
+
+    def _check_learned(self, position: str) -> None:
+        truth = source(False, position)
         target = 3.0 * _synth(nn.ModuleList([truth]), 32, [(6, 3)]).detach()
         for fit in ("reinforce", "random_search", "gumbel_sampled"):
-            models = nn.ModuleList([source(True)])
+            models = nn.ModuleList([source(True, position)])
             if fit == "reinforce":
                 fit_filtered(models, target, TriangleFitConfig(
-                    method="reinforce", epochs=5, refine_epochs=200, n_fft=32), "dp")
+                    method="reinforce", epochs=5, refine_epochs=200, n_fft=32), position)
             elif fit == "random_search":
                 fit_random_search(models, target, dict(
                     variant="local", samples=4, epochs=5, refine_epochs=200, n_fft=32,
@@ -50,7 +62,7 @@ class OutputGainTests(unittest.TestCase):
                     samples=3, physical_weighting="softmax", epochs=5, refine_epochs=200,
                     n_fft=32, temperature_start=1.0, temperature_end=0.1, discrete_lr=0.003,
                     continuous_lr=0.01, prior_start=0.05, prior_end=0.001, smoothness=1e-4,
-                    spectrum_normalization="none", log_every=10), "dp")
+                    spectrum_normalization="none", log_every=10), position)
             self.assertGreater(float(models[0].output_gain()), 1.2, fit)
 
 

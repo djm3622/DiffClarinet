@@ -23,10 +23,16 @@ def triangle(n_samples: int, L: int | torch.Tensor,
 
 
 class KarplusStrongTriangle(KarplusStrongFixed):
-    """Categorical integer (L, A), with continuous loop gain K and allpass a."""
+    """Categorical integer (L, A), with continuous loop gain K and allpass a.
+
+    ``output_gain_learnable`` adds an output (loudness) gain g = exp(log_output_gain),
+    initialized to 1, for targets whose level K cannot match (real audio). Off,
+    the output is exactly the MATLAB model (g = 1).
+    """
 
     def __init__(self, delay_len_min: int, delay_len_max: int,
-                 A_min: int, A_max: int, **kwargs) -> None:
+                 A_min: int, A_max: int, output_gain_learnable: bool = False,
+                 **kwargs) -> None:
         if delay_len_min < 2 or delay_len_max < delay_len_min:
             raise ValueError("Invalid L candidate bounds.")
         if A_min < 1 or A_max < A_min or A_min >= delay_len_max:
@@ -43,6 +49,12 @@ class KarplusStrongTriangle(KarplusStrongFixed):
             nn.init.uniform_(self.A_logits, -1e-3, 1e-3)
         if self.valid_pair_count() == 0:
             raise ValueError("Candidate grid contains no valid (L, A) pair.")
+        if output_gain_learnable:
+            self.log_output_gain = nn.Parameter(torch.zeros(()))
+
+    def output_gain(self) -> torch.Tensor | float:
+        gain = getattr(self, "log_output_gain", None)
+        return 1.0 if gain is None else gain.exp()
 
     def _unit(self, unit_impulse: torch.Tensor) -> torch.Tensor:
         source = unit_impulse.flatten()
@@ -116,7 +128,8 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         z = self.z
         numerator = a / 2 + (a + 1) / 2 * z.pow(-1) + 0.5 * z.pow(-2)
         denominator = 1 + a * z.pow(-1) - K * numerator * z.pow(-L)
-        return torch.fft.rfft(excitation) * numerator / denominator
+        response = torch.fft.rfft(excitation) * numerator / denominator
+        return response * self.output_gain() if hasattr(self, "log_output_gain") else response
 
     def time_domain_synth(self, n_samples: int, unit_impulse: torch.Tensor,
                           L: int | None = None, A: int | None = None) -> torch.Tensor:
@@ -141,7 +154,7 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         output = torchaudio.functional.lfilter(excitation, denominator, b, clamp=False)
         if not bool(torch.isfinite(output).all()):
             raise FloatingPointError("Nonfinite causal triangle output.")
-        return output
+        return output * self.output_gain() if hasattr(self, "log_output_gain") else output
 
     def forward(self, unit_impulse: torch.Tensor,
                 L: int | None = None, A: int | None = None) -> torch.Tensor:
