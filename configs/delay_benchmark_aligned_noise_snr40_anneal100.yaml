@@ -1,0 +1,55 @@
+# Gradient-friendly noise losses at 40 dB, triangle, REINFORCE and sampled Gumbel, n = 1, 2, 3, 5, 7,
+# all 32 k05 cases, seed 0: option 3: noise_floor with the floor annealed from 100x to 1x over phase 1.
+# Paired with delay_benchmark_aligned_noise_snr40_{none,noise_floor}.yaml (same cases, init, noise).
+output_dir: output/delay_benchmark_aligned_noise_snr40_anneal100
+datasets:
+  triangle: data/vary_all_triangle
+methods:
+- reinforce
+- gumbel_sampled
+source_counts:
+- 1
+- 2
+- 3
+- 5
+- 7
+seeds:
+- 0
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: noise_floor
+  noise_floor_anneal: 100.0
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 500
+  show_progress: false
+workers: 1
+sampled_gumbel:
+  samples: 8
+  physical_weighting: softmax
+target_noise:
+  snr_db: 40

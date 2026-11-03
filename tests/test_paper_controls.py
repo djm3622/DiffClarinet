@@ -1,0 +1,156 @@
+"""Ceiling (K-grid exhaustive, oracle-K REINFORCE) and target-noise controls."""
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+import unittest.mock
+
+import torch
+from scipy.io import wavfile
+from torch import nn
+
+from model.kps.training import (TriangleFitConfig, _synth, _triangle_spectral_loss, fit_filtered,
+                                noise_floor_power, noise_floor_scale, set_gain_)
+from scripts import run_delay_benchmark as benchmark
+from tests.test_filtered_fitting import make_source
+
+CEILING = benchmark.ROOT / "configs/delay_benchmark_ceiling_n1.yaml"
+NOISE = {snr: benchmark.ROOT / f"configs/delay_benchmark_noise_snr{snr}.yaml"
+         for snr in (40, 20, 10)}
+QUICK = ["fit.epochs=3", "fit.refine_epochs=2"]
+
+
+def first_row(config: dict, kind: str, method: str, count: int = 1):
+    plan, inventories = benchmark.make_plan(config)
+    row = next(r for r in plan if r["filter"] == kind and r["method"] == method
+               and r["source_count"] == count)
+    return row, [inventories[kind][i] for i in json.loads(row["indices"])]
+
+
+class PaperControlTests(unittest.TestCase):
+    def test_plan_sizes(self) -> None:
+        plan, _ = benchmark.make_plan(benchmark.read_config(CEILING, []))
+        self.assertEqual(len(plan), 128)
+        for path in NOISE.values():
+            plan, _ = benchmark.make_plan(benchmark.read_config(path, []))
+            self.assertEqual(len(plan), 90)
+        config = benchmark.read_config(
+            benchmark.ROOT / "configs/delay_benchmark_noise_exhaustive_triangle_snr40.yaml", [])
+        plan, _ = benchmark.make_plan(config)
+        self.assertEqual(len(plan), 32)
+        self.assertEqual({row["filter"] for row in plan}, {"triangle"})
+        self.assertEqual(config["target_noise"]["snr_db"], 40)
+
+    def test_set_gain_round_trip(self) -> None:
+        source = make_source("dp")
+        source.gain_min, source.gain_max = 0.5, 1.0
+        for K in (0.55, 0.7, 0.98):
+            set_gain_(source, K)
+            self.assertAlmostEqual(float(source.scaled_gain()), K, places=6)
+        with self.assertRaises(ValueError):
+            set_gain_(source, 0.5)
+
+    def test_gain_grid_recovers_pair_and_grid_gain(self) -> None:
+        for position in ("dp", "A"):
+            with self.subTest(position=position):
+                truth = make_source(position)
+                set_gain_(truth, 0.6)
+                target = _synth(nn.ModuleList([truth]), 32, [(6, 3)]).detach()
+                models = nn.ModuleList([make_source(position)])
+                config = TriangleFitConfig(method="exhaustive", epochs=0, refine_epochs=0,
+                                           n_fft=32, exhaustive_gain_grid=[0.95, 0.6, 0.8])
+                result = fit_filtered(models, target, config, position)
+                self.assertEqual(result.pairs, [(6, 3)])
+                self.assertAlmostEqual(float(models[0].scaled_gain()), 0.6, places=6)
+                self.assertEqual(result.search_evaluations, 3 * len(models[0].all_pairs()))
+        with self.assertRaises(ValueError):
+            TriangleFitConfig(method="reinforce", exhaustive_gain_grid=[0.6])
+
+    def test_oracle_K_reinforce_keeps_true_K(self) -> None:
+        config = benchmark.read_config(CEILING, QUICK)
+        for kind in ("comb", "triangle"):
+            row, paths = first_row(config, kind, "reinforce_oracle_K")
+            with tempfile.TemporaryDirectory() as directory:
+                benchmark.fit_case(row, config, paths, Path(directory))
+                summary = json.loads((Path(directory) / "summary.json").read_text())
+            self.assertEqual(summary["fit_config"]["method"], "reinforce_oracle_K")
+            self.assertLess(summary["matched_sources"][0]["K_mae"], 1e-6)
+            losses = summary["fit_window_losses"]["observed"]
+            self.assertEqual(set(losses), {"found", "truth", "truth_initial_a"})
+            if summary["matched_sources"][0]["exact_pair_fraction"]:
+                self.assertAlmostEqual(losses["found"], losses["truth"], delta=0.5)
+
+    def test_K_grid_dispatch_reports_grid_search_size(self) -> None:
+        config = benchmark.read_config(CEILING, QUICK + ["exhaustive_K_grid=[0.6, 0.9]"])
+        row, paths = first_row(config, "comb", "exhaustive_K_grid")
+        with tempfile.TemporaryDirectory() as directory:
+            with unittest.mock.patch("model.kps.training._enumerate",
+                                     return_value=([(150, 20)], 7)) as search:
+                benchmark.fit_case(row, config, paths, Path(directory))
+            summary = json.loads((Path(directory) / "summary.json").read_text())
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(summary["search_size"], 2 * 10099)
+        self.assertEqual(summary["search_evaluations"], 14)
+        self.assertEqual(summary["fit_config"]["exhaustive_gain_grid"], [0.6, 0.9])
+
+    def test_noise_is_case_seeded_at_requested_snr_and_scored_clean(self) -> None:
+        observed = {}
+        for snr, path in NOISE.items():
+            config = benchmark.read_config(path, QUICK)
+            for method in ("reinforce", "random_search_local"):
+                row, paths = first_row(config, "triangle", method)
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory)
+                    benchmark.fit_case(row, config, paths, output)
+                    summary = json.loads((output / "summary.json").read_text())
+                    noisy = wavfile.read(output / "observed_mixture.wav")[1]
+                    clean = wavfile.read(output / "target_mixture.wav")[1]
+                noise = torch.from_numpy(noisy - clean)
+                self.assertAlmostEqual(summary["target_noise"]["fit_window_snr_db"], snr, places=3)
+                observed.setdefault(snr, []).append(noise)
+        for snr, (first, second) in observed.items():
+            self.assertTrue(torch.equal(first, second), snr)  # same across methods
+        scale = observed[20][0].norm() / observed[40][0].norm()
+        self.assertTrue(torch.allclose(observed[20][0], observed[40][0] * scale, atol=1e-6))
+        self.assertAlmostEqual(float(scale), 10.0, places=3)
+
+    def test_noise_floor_estimates_white_noise_power(self) -> None:
+        generator = torch.Generator().manual_seed(0)
+        noise = torch.randn(8192, generator=generator, dtype=torch.float64)
+        spectrum = torch.fft.rfft(noise)
+        self.assertAlmostEqual(float(noise_floor_power(spectrum)) / 8192, 1.0, delta=0.15)
+        # Noise only: a silent prediction plus the floor is already close.
+        silent = _triangle_spectral_loss(torch.zeros_like(spectrum), spectrum, "noise_floor")
+        none = _triangle_spectral_loss(torch.zeros_like(spectrum), spectrum, "none")
+        self.assertLess(float(silent), 4.0)
+        self.assertGreater(float(none), float(silent))
+
+    def test_noise_floor_scale_and_sqrt_variant(self) -> None:
+        generator = torch.Generator().manual_seed(1)
+        target = torch.fft.rfft(torch.randn(8192, generator=generator, dtype=torch.float64))
+        prediction = torch.fft.rfft(torch.randn(8192, generator=generator, dtype=torch.float64))
+        floor = noise_floor_power(target)
+        explicit = 5 * (torch.log10(prediction.abs().square() + floor)
+                        - torch.log10(target.abs().square())).abs().mean()
+        self.assertAlmostEqual(float(_triangle_spectral_loss(prediction, target, "noise_floor")),
+                               float(explicit), places=10)
+        # A larger floor hides more of the spectrum, so the same mismatch costs less.
+        scaled = [float(_triangle_spectral_loss(prediction, target, mode, scale))
+                  for mode in ("noise_floor", "noise_floor_sqrt") for scale in (1.0, 100.0)]
+        self.assertGreater(scaled[0], scaled[1])
+        self.assertGreater(scaled[2], scaled[3])
+        config = TriangleFitConfig(method="reinforce", epochs=11, spectrum_normalization="noise_floor",
+                                   noise_floor_anneal=100.0)
+        self.assertAlmostEqual(noise_floor_scale(0, config), 100.0)
+        self.assertAlmostEqual(noise_floor_scale(5, config), 10.0)
+        self.assertAlmostEqual(noise_floor_scale(10, config), 1.0)
+        for bad in (dict(method="reinforce", noise_floor_anneal=10.0),
+                    dict(method="exhaustive", spectrum_normalization="noise_floor", noise_floor_anneal=10.0),
+                    dict(method="reinforce", spectrum_normalization="noise_floor", noise_floor_anneal=0.5)):
+            with self.assertRaises(ValueError):
+                TriangleFitConfig(**bad)
+
+
+if __name__ == "__main__":
+    unittest.main()
