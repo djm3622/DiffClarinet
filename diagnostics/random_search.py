@@ -41,6 +41,16 @@ def propose(grids, valid, incumbent: list[tuple[int, int]], cfg: dict):
     if cfg["variant"] == "global":
         return [_uniform(grids, source) for source in range(len(grids))]
     pairs = list(incumbent)
+    # Opt-in (search_prototypes): exchange L, position or both between two sources.
+    if len(pairs) > 1 and cfg.get("swap_probability", 0) > 0 \
+            and float(torch.rand(())) < cfg["swap_probability"]:
+        i, j = torch.randperm(len(pairs))[:2].tolist()
+        kind = int(torch.randint(3, ()))
+        first = (pairs[j][0] if kind != 1 else pairs[i][0], pairs[j][1] if kind != 0 else pairs[i][1])
+        second = (pairs[i][0] if kind != 1 else pairs[j][0], pairs[i][1] if kind != 0 else pairs[j][1])
+        if first in valid[i] and second in valid[j]:
+            pairs[i], pairs[j] = first, second
+            return pairs
     source = int(torch.randint(len(pairs), ()))
     if float(torch.rand(())) < cfg["local_probability"]:
         pairs[source] = _uniform(grids, source)
