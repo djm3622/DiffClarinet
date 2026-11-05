@@ -1,0 +1,48 @@
+# OT loss pilot, arm combined_lam1: triangle n=1, the 32 k05 cases, seed 0, clean audio.
+# Model and fit budget match the full-coverage configs.
+output_dir: output/ot_loss_20261105/pilot/combined_lam1
+datasets:
+  triangle: data/vary_all_triangle
+methods:
+- reinforce
+- lagrange
+source_counts:
+- 1
+seeds:
+- 0
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  relaxation_initialization: random
+  initial_position: null
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  loss_mode: combined
+  ot_lambda: 1.0
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 1000
+  show_progress: false
+workers: 1

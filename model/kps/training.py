@@ -778,6 +778,7 @@ def train_model(
 # Triangle unit-impulse fitting for both single and known-count mixtures.
 # Lagrange fractional synthesis; round_ste rounds delays in the forward pass.
 LAGRANGE_METHODS = ("lagrange", "round_ste")
+OT_LOSS_MODES = ("old", "combined", "late")
 
 
 @dataclass(frozen=True)
@@ -795,6 +796,8 @@ class TriangleFitConfig:
     ordinal_smoothness_weight: float = 1e-4
     advantage_clip: float = 5.0
     spectrum_normalization: str = "none"
+    loss_mode: str = "old"
+    ot_lambda: float = 0.0
     print_frequency: int = 1000
     gumbel_temperature: float = 1.0
     gumbel_temperature_end: float = 0.1
@@ -807,6 +810,11 @@ class TriangleFitConfig:
             raise ValueError("Unsupported triangle fitting method.")
         if self.spectrum_normalization not in {"peak", "none"}:
             raise ValueError("Spectrum normalization must be 'peak' or 'none'.")
+        if self.loss_mode not in OT_LOSS_MODES:
+            raise ValueError("Loss mode must be 'old', 'combined', or 'late'.")
+        if self.loss_mode != "old" and (
+                self.ot_lambda <= 0 or self.method not in {"reinforce", *LAGRANGE_METHODS}):
+            raise ValueError("W1 loss needs ot_lambda > 0 and REINFORCE or Lagrange.")
         if self.print_frequency < 1:
             raise ValueError("Print frequency must be positive.")
         if self.prior_anneal_epochs < 1:
@@ -946,13 +954,14 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
                        disable=not config.show_progress)
     for epoch_index in phase_one:
         optimizer.zero_grad()
+        ot_weight = _ot_weight(config, epoch_index)
         samples = [model.sample_pairs(config.reinforce_samples)
                    if position == "A" else model.sample_delay_pairs(config.reinforce_samples)
                    for model in models]
         losses = torch.stack([
             _loss(_synth(models, config.n_fft,
                          [source[0][i] for source in samples]),
-                  target_spectrum, config.spectrum_normalization)
+                  target_spectrum, config.spectrum_normalization, ot_weight)
             for i in range(config.reinforce_samples)
         ])
         detached = losses.detach()
@@ -996,7 +1005,8 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
         for epoch_index in phase_two:
             optimizer.zero_grad()
             measured = _loss(_synth(models, config.n_fft, result.pairs),
-                             target_spectrum, config.spectrum_normalization)
+                             target_spectrum, config.spectrum_normalization,
+                             _ot_weight(config, config.epochs))
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
@@ -1011,19 +1021,40 @@ def fit_filtered_reinforce(models: nn.ModuleList, target: torch.Tensor,
     return result
 
 
+def _w1_spectral_loss(prediction: torch.Tensor,
+                      target_spectrum: torch.Tensor) -> torch.Tensor:
+    """Mean absolute CDF difference between sum-normalized magnitude spectra."""
+    model, target = prediction.abs(), target_spectrum.abs()
+    return ((model / model.sum()).cumsum(0)
+            - (target / target.sum()).cumsum(0)).abs().mean()
+
+
+def _ot_weight(config: TriangleFitConfig, phase_one_step: int) -> float:
+    """W1 weight; 'late' leaves the first half of phase one on the old loss."""
+    if config.loss_mode == "old" or (
+            config.loss_mode == "late" and phase_one_step < config.epochs // 2):
+        return 0.0
+    return config.ot_lambda
+
+
 def _triangle_spectral_loss(prediction: torch.Tensor,
                             target_spectrum: torch.Tensor,
-                            normalization: str) -> torch.Tensor:
+                            normalization: str,
+                            ot_weight: float = 0.0) -> torch.Tensor:
     if normalization == "peak":
-        return loss_fn(prediction, target_spectrum)
-    return (to_log_mag(prediction, rel_to_max=False)
-            - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
+        loss = loss_fn(prediction, target_spectrum)
+    else:
+        loss = (to_log_mag(prediction, rel_to_max=False)
+                - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
+    if ot_weight:
+        loss = loss + ot_weight * _w1_spectral_loss(prediction, target_spectrum)
+    return loss
 
 
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
-          normalization: str) -> torch.Tensor:
-    return _triangle_spectral_loss(torch.fft.rfft(prediction),
-                                   target_spectrum, normalization)
+          normalization: str, ot_weight: float = 0.0) -> torch.Tensor:
+    return _triangle_spectral_loss(torch.fft.rfft(prediction), target_spectrum,
+                                   normalization, ot_weight)
 
 
 def _pitch_lengths(audio: torch.Tensor, models: nn.ModuleList) -> list[int]:
@@ -1212,7 +1243,8 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
                     for model in models
                 ]).sum(0)
                 measured = _loss(prediction, target_spectrum,
-                                 config.spectrum_normalization)
+                                 config.spectrum_normalization,
+                                 _ot_weight(config, epoch_index))
                 objective = measured
             else:
                 pairs = [model.selected_delays() for model in models]
@@ -1262,7 +1294,8 @@ def fit_filtered(models: nn.ModuleList, target: torch.Tensor,
         for epoch_index in phase_two:
             optimizer.zero_grad()
             measured = _loss(_synth(models, config.n_fft, pairs), target_spectrum,
-                             config.spectrum_normalization)
+                             config.spectrum_normalization,
+                             _ot_weight(config, config.epochs))
             if not torch.isfinite(measured):
                 raise FloatingPointError("Nonfinite causal refinement objective.")
             measured.backward()
