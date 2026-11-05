@@ -30,17 +30,30 @@ def log(message):
         stream.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
 
 
+def tasks(job_id):
+    """Count tasks in a squeue id such as 123, 123_4, or 123_[0-16:2,20%5]."""
+    if "[" not in job_id:
+        return 1
+    total = 0
+    for part in job_id.split("[")[1].split("]")[0].split("%")[0].split(","):
+        bounds, _, step = part.partition(":")
+        first, _, last = bounds.partition("-")
+        total += (int(last or first) - int(first)) // int(step or 1) + 1
+    return total
+
+
 def usage():
     """Return (fit jobs of ours, free fit slots), or None if squeue failed."""
-    out = subprocess.run(["squeue", "-u", USER, "-h", "-r", "-o", "%j"],
-                         capture_output=True, text=True)
+    # squeue -r drops the last task of a stepped pending array, so expand ids here.
+    out = subprocess.run(["squeue", "-u", USER, "-h", "-o", "%2000i|%j"], capture_output=True,
+                         text=True, env={**os.environ, "SLURM_BITSTR_LEN": "0"})
     if out.returncode:  # transient: submit nothing this poll
         log(f"squeue failed: {out.stderr.strip()}")
         return None
-    names = out.stdout.split()
-    ours = sum(n.startswith("dc-ot-") and n != FEEDER_NAME for n in names)
-    fill = sum(n.startswith("dc-fill-") for n in names)
-    noise = sum(n.startswith(("dc-nl", "diffclarinet-")) for n in names)
+    jobs = [line.strip().split("|", 1) for line in out.stdout.splitlines()]
+    ours = sum(tasks(i) for i, n in jobs if n.startswith("dc-ot-") and n != FEEDER_NAME)
+    fill = sum(tasks(i) for i, n in jobs if n.startswith("dc-fill-"))
+    noise = sum(tasks(i) for i, n in jobs if n.startswith(("dc-nl", "diffclarinet-")))
     share = min(SHARE, PROJECT_CAP - max(NOISE_SHARE, noise) - (fill + 1))
     return ours, share - 1 - ours
 
