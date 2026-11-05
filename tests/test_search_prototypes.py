@@ -2,6 +2,7 @@
 
 from itertools import product
 import unittest
+from unittest import mock
 
 import torch
 from torch import nn
@@ -9,7 +10,7 @@ from torch import nn
 from diagnostics import search_prototypes as p
 from diagnostics.random_search import fit_random_search, propose
 from model.kps.training import _synth
-from scripts.run_search_prototypes import SETTINGS
+from scripts.run_search_prototypes import SETTINGS, main
 from tests.test_filtered_fitting import make_source
 
 
@@ -73,6 +74,38 @@ class PrototypeTests(unittest.TestCase):
         # Per update: 3 sources at gradient cost 3, at most 3 proposals, 1 accepted re-render.
         self.assertGreater(last["updates"], 40 * 4 * 3 / (9 + 3 + 1) - 1)
         self.assertLess(last["updates"], 40 * 4 * 3 / 9 + 1)
+
+    def test_rs_cached_turns_swaps_off_and_counts_proposals(self) -> None:
+        torch.manual_seed(5)
+        models = nn.ModuleList(make_source("dp") for _ in range(3))
+        target = _synth(models, 32, [(5, 2), (6, 3), (5, 3)]).detach()
+        settings = cfg(epochs=40, refine_epochs=1, swap_probability=1.0)
+        with mock.patch.object(p, "propose", wraps=p.propose) as proposal:
+            history, _ = p.fit_rs_cached(models, target, settings)
+        self.assertTrue(all(call.args[3]["swap_probability"] == 0 for call in proposal.call_args_list))
+        last = next(row for row in reversed(history) if "updates" in row)
+        self.assertEqual(last["proposals_drawn"], proposal.call_count)
+        self.assertEqual(last["proposals_drawn"], last["updates"] * (settings["samples"] - 1))
+        self.assertLessEqual(last["proposals_accepted"], last["updates"])
+        self.assertLessEqual(last["proposals_noop"], last["proposals_drawn"])
+
+    def test_mcmc_pt_and_elitist_record_proposals(self) -> None:
+        torch.manual_seed(6)
+        models = nn.ModuleList(make_source("dp") for _ in range(2))
+        target = _synth(models, 32, [(5, 2), (6, 3)]).detach()
+        settings = cfg(epochs=20, refine_epochs=1)
+        history, _ = p.fit_mcmc_pt(models, target, settings)
+        row = next(r for r in history if "proposals_drawn" in r)
+        self.assertGreater(row["proposals_drawn"], 0)
+        self.assertLessEqual(row["proposals_accepted"] + row["proposals_noop"], row["proposals_drawn"])
+        history, _ = p.fit_reinforce_elitist(models, target, settings, "dp")
+        row = next(r for r in history if "proposals_drawn" in r)
+        self.assertEqual(row["proposals_drawn"], settings["epochs"] * (settings["samples"] - 2))
+
+    def test_runner_rejects_unknown_methods(self) -> None:
+        with mock.patch("sys.argv", ["run", "--methods", "random_search_local", "--list-jobs"]):
+            with self.assertRaises(SystemExit):
+                main()
 
     def test_em_backfit_recovers_an_easy_mixture(self) -> None:
         torch.manual_seed(2)

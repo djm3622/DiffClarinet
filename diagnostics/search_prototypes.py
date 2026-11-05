@@ -175,6 +175,7 @@ def fit_reinforce_elitist(models, target, cfg, position, log_path=None):
         objective.backward()
         _checked_filtered_step(optimizer, models, "reinforce_elitist", step)
         log(calls, measured.detach(), incumbent, models)
+    log.rows.append({"calls": calls, "proposals_drawn": cfg["epochs"] * count})
     for parameter in logits:
         parameter.requires_grad_(False)
     return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
@@ -222,7 +223,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     sources, temperatures = len(models), cfg["temperatures"]
     budget = cfg["epochs"] * cfg["samples"] * sources
     log = Log(log_path, cfg["log_calls"])
-    calls = sweep = 0
+    calls = sweep = drawn = noop = accepted = 0
 
     def wave(i, pair, K, a):
         _set_K(models[i], K)
@@ -245,6 +246,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
         best = {key: list(best[key]) for key in ("pairs", "K", "a")} | {"loss": best["loss"]}
         while calls < budget:
             for chain, T in zip(chains, temperatures):
+                drawn += 1
                 move = float(torch.rand(()))
                 i = int(torch.randint(sources, ()))
                 changed = {}
@@ -272,6 +274,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                     if pair in valid[i] and pair != chain["pairs"][i]:
                         changed = {i: (pair, chain["K"][i], chain["a"][i])}
                 if not changed:
+                    noop += 1
                     continue
                 waves = list(chain["waves"])
                 for index, (pair, K, a) in changed.items():
@@ -279,6 +282,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                 calls += len(changed)
                 loss = score(waves)
                 if loss <= chain["loss"] or float(torch.rand(())) < math.exp((chain["loss"] - loss) / T):
+                    accepted += 1
                     for index, (pair, K, a) in changed.items():
                         chain["pairs"][index], chain["K"][index], chain["a"][index] = pair, K, a
                     chain["waves"], chain["loss"] = waves, loss
@@ -296,6 +300,8 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
         for i in range(sources):
             _set_K(models[i], best["K"][i])
             _set_a(models[i], best["a"][i])
+    log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_noop": noop,
+                     "proposals_accepted": accepted})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
 
 
@@ -812,10 +818,11 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
 def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
     """random_search_local with cached sources: a proposal re-synthesizes only what it changes.
 
-    Same proposal distribution, keep-best rule and per-update Adam step on K/a. Charged as in
-    fit_mcmc_grad: one synthesis per changed source, cfg["gradient_cost"] per source gradient.
-    K/a move every update, so each update re-renders the n sources with gradients.
+    Same proposal distribution (swap moves off), keep-best rule and per-update Adam step on K/a.
+    Charged as in fit_mcmc_grad: one synthesis per changed source, cfg["gradient_cost"] per source
+    gradient. K/a move every update, so each update re-renders the n sources with gradients.
     """
+    cfg = {**cfg, "swap_probability": 0}
     n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
     spectrum = torch.fft.rfft(target[:n])
     grids, valid = _grids(models)
@@ -824,7 +831,7 @@ def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
     incumbent = [_uniform(grids, i) for i in range(sources)]
     optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"])
     log = Log(log_path, cfg["log_calls"])
-    calls = updates = 0
+    calls = updates = noop = accepted = 0
     while calls < budget:
         optimizer.zero_grad()
         waves = [_wave(m, n, p) for m, p in zip(models, incumbent)]
@@ -836,6 +843,7 @@ def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
                 candidate = propose(grids, valid, incumbent, cfg)
                 changed = [i for i, (a, b) in enumerate(zip(candidate, incumbent)) if a != b]
                 if not changed:
+                    noop += 1
                     continue
                 trial = total
                 for i in changed:
@@ -845,6 +853,7 @@ def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
                 if score < best_score:
                     best_score, best = score, (candidate, changed)
         if best is not None:
+            accepted += 1
             incumbent = best[0]
             for i in best[1]:
                 waves[i] = _wave(models[i], n, incumbent[i])
@@ -854,6 +863,8 @@ def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
         _checked_filtered_step(optimizer, models, "rs_cached", updates)
         updates += 1
         log(calls, measured.detach(), incumbent, models)
-    log.rows.append({"calls": calls, "updates": updates})
+    log.rows.append({"calls": calls, "updates": updates,
+                     "proposals_drawn": updates * (cfg["samples"] - 1), "proposals_noop": noop,
+                     "proposals_accepted": accepted})
     return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
 

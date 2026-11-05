@@ -20,6 +20,7 @@ CONFIG = "configs/delay_benchmark_random_search_local_full.yaml"
 METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", "mcmc_pt",
            "em_backfit", "em_backfit_klapuri", "cem_joint", "mp_init", "gibbs_pt", "mcmc_grad",
            "mcmc_grad_noLgrad")
+EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot")
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
                 swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
@@ -102,19 +103,23 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
             position, [int(v["L"]) for v in truth], progress)
     elif method == "gibbs_pt":
         history, calls = prototypes.fit_gibbs_pt(models, target, cfg, progress)
-    else:
+    elif method == "mcmc_pt":
         history, calls = prototypes.fit_mcmc_pt(models, target, cfg, progress)
+    else:
+        raise ValueError(f"Unknown search prototype: {method}")
     seconds = time.perf_counter() - start
     models.eval()
     metrics, matches = benchmark.evaluate(benchmark.synthesize(models, stems.shape[-1]), stems,
                                           models, truth, paths, output, rate)
     found = [model.selected_delays() for model in models]
     true_pairs = [(int(v["L"]), int(v["position"])) for v in truth]
+    counters = next((row for row in history if "proposals_drawn" in row), {})
     summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
                "source_syntheses": calls, "found": found, "true": true_pairs,
                "set_overlap": sum((Counter(found) & Counter(true_pairs)).values()) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
-               * row["source_count"], "history": history}
+               * row["source_count"], "history": history,
+               **{key: value for key, value in counters.items() if key.startswith("proposals_")}}
     benchmark.write_json(output / "summary.json", summary)
     return summary
 
@@ -142,6 +147,9 @@ def main() -> None:
     parser.add_argument("--extra-methods", nargs="*", default=[],
                         help="Appended after --methods, so earlier job indices do not move")
     args = parser.parse_args()
+    unknown = set(args.methods + args.extra_methods) - set(METHODS + EXTRA_METHODS)
+    if unknown:  # safe_case would only print the error and exit 0.
+        parser.error(f"unknown methods: {sorted(unknown)}")
     config = benchmark.read_config(benchmark.ROOT / CONFIG, [])
     plan, inventories = benchmark.make_plan(config)
     jobs = []
