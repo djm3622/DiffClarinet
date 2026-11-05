@@ -13,12 +13,18 @@ import torch
 from diagnostics import search_prototypes as prototypes
 from diagnostics.random_search import fit_random_search
 from scripts import run_delay_benchmark as benchmark
+from scripts.eval.source_baselines import loop_pitch, multipitch_klapuri
 
 CONFIG = "configs/delay_benchmark_random_search_local_full.yaml"
-METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", "mcmc_pt")
+METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", "mcmc_pt",
+           "em_backfit", "em_backfit_klapuri", "cem_joint", "mp_init", "gibbs_pt")
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
-                swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20)
+                swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
+                em_K_coarse=[0.6, 0.8, 0.95], em_K_grid=[0.55, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98],
+                em_top=16, em_refine_steps=20, mp_K=[0.6, 0.8, 0.95], mp_a=[0.25, 0.75],
+                cem_samples=64, cem_elite=0.1, cem_alpha=0.3, cem_floor=1e-3,
+                gibbs_temperatures=[0.05, 0.25, 1.0])
 
 
 def settings(config: dict, scale: float = 1.0) -> dict:
@@ -34,6 +40,16 @@ def settings(config: dict, scale: float = 1.0) -> dict:
             "smoothness": fit["ordinal_smoothness_weight"],
             "advantage_clip": fit["advantage_clip"], "log_every": 1000, "log_calls": 2000,
             "initial_K": config["model"]["initial_K"], "initial_a": config["model"]["initial_a"]}
+
+
+def klapuri_delays(target: torch.Tensor, rate: int, config: dict, count: int) -> list[int]:
+    """Nearest L (at the middle all-pass value) for each Klapuri pitch; may return fewer."""
+    bounds = config["model"]
+    window = target[:config["fit"]["n_fft"]].numpy()
+    pitches, _ = multipitch_klapuri(window, rate, count, loop_pitch(bounds["L_max"], 0.0, rate),
+                                    loop_pitch(bounds["L_min"], 1.0, rate))
+    delays = range(bounds["L_min"], bounds["L_max"] + 1)
+    return [min(delays, key=lambda L: abs(loop_pitch(L, 0.5, rate) - pitch)) for pitch in pitches]
 
 
 def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: float) -> dict:
@@ -62,6 +78,17 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
         history, calls = prototypes.fit_reinforce_elitist(models, target, cfg, position, progress)
     elif method == "reinforce_kprofile":
         history, calls = prototypes.fit_reinforce_kprofile(models, target, cfg, position, progress)
+    elif method == "em_backfit":
+        history, calls = prototypes.fit_em_backfit(models, target, cfg, progress)
+    elif method == "em_backfit_klapuri":
+        history, calls = prototypes.fit_em_backfit(
+            models, target, cfg, progress, init_L=klapuri_delays(target, rate, config, len(models)))
+    elif method == "cem_joint":
+        history, calls = prototypes.fit_cem_joint(models, target, cfg, progress)
+    elif method == "mp_init":
+        history, calls = prototypes.fit_mp_init(models, target, cfg, progress)
+    elif method == "gibbs_pt":
+        history, calls = prototypes.fit_gibbs_pt(models, target, cfg, progress)
     else:
         history, calls = prototypes.fit_mcmc_pt(models, target, cfg, progress)
     seconds = time.perf_counter() - start

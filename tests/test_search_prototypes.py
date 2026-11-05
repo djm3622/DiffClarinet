@@ -39,7 +39,12 @@ class PrototypeTests(unittest.TestCase):
                 "elitist": lambda m, t, c, pos: p.fit_reinforce_elitist(m, t, c, pos),
                 "rkprofile": lambda m, t, c, pos: p.fit_reinforce_kprofile(m, t, c, pos),
                 "mcmc": lambda m, t, c, pos: p.fit_mcmc_pt(m, t, c),
-                "swap": lambda m, t, c, pos: fit_random_search(m, t, c)}
+                "swap": lambda m, t, c, pos: fit_random_search(m, t, c),
+                "em": lambda m, t, c, pos: p.fit_em_backfit(m, t, c),
+                "em_seeded": lambda m, t, c, pos: p.fit_em_backfit(m, t, c, init_L=[5]),
+                "cem": lambda m, t, c, pos: p.fit_cem_joint(m, t, c),
+                "mp": lambda m, t, c, pos: p.fit_mp_init(m, t, c),
+                "gibbs": lambda m, t, c, pos: p.fit_gibbs_pt(m, t, c)}
         for name, position, count in product(fits, ("dp", "A"), (1, 2)):
             with self.subTest(name=name, position=position, count=count):
                 torch.manual_seed(1)
@@ -53,6 +58,16 @@ class PrototypeTests(unittest.TestCase):
                 self.assertTrue(history)
                 for model in models:
                     self.assertTrue(torch.isfinite(model.scaled_gain()))
+
+    def test_em_backfit_recovers_an_easy_mixture(self) -> None:
+        torch.manual_seed(2)
+        models = nn.ModuleList(make_source("dp") for _ in range(2))
+        truth = [(5, 2), (6, 3)]
+        target = _synth(models, 32, truth).detach()
+        history, _ = p.fit_em_backfit(models, target, cfg(epochs=200, em_top=4, em_refine_steps=2,
+                                                          em_K_coarse=[.8], em_K_grid=[.8]))
+        self.assertEqual(sorted(tuple(pair) for pair in
+                                next(r for r in reversed(history) if "pairs" in r)["pairs"]), truth)
 
 
 if __name__ == "__main__":

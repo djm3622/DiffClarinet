@@ -294,3 +294,271 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
             _set_K(models[i], best["K"][i])
             _set_a(models[i], best["a"][i])
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
+
+
+def _start_pairs(models, grids, init_L=None):
+    pairs = []
+    for i, grid in enumerate(grids):
+        L = None if init_L is None or i >= len(init_L) else init_L[i]
+        options = [pair for pair in grid if pair[0] == L] or grid
+        pairs.append(options[int(torch.randint(len(options), ()))])
+    return pairs
+
+
+def _source_update(models, i, pairs, waves, target, spectrum, cfg, budget, calls):
+    """Exact (L, position) search for source i on the residual, profiled over K.
+
+    All pairs are scored at em_K_coarse; the top em_top get the full em_K_grid, then a
+    few Adam steps on K and a. Returns (pair, K, a, wave, calls), or None if out of budget.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    model = models[i]
+    grid = model.all_pairs()
+    cost = len(grid) * len(cfg["em_K_coarse"]) + cfg["em_top"] * len(cfg["em_K_grid"]) + cfg["em_refine_steps"]
+    if calls + cost > budget:
+        return None
+    rest = sum((w for j, w in enumerate(waves) if j != i), torch.zeros(n))
+    residual = target[:n] - rest
+    residual_spectrum = torch.fft.rfft(residual)
+    K0, a0 = float(model.scaled_gain()), float(model.scaled_allplus())
+    with torch.no_grad():
+        scores = torch.full((len(grid),), float("inf"))
+        for K in cfg["em_K_coarse"]:
+            _set_K(model, K)
+            for index, pair in enumerate(grid):
+                scores[index] = min(float(scores[index]),
+                                    float(_loss(_wave(model, n, pair), residual_spectrum, norm)))
+        calls += len(grid) * len(cfg["em_K_coarse"])
+        best = (float("inf"), None, None)
+        for index in scores.argsort()[:cfg["em_top"]].tolist():
+            for K in cfg["em_K_grid"]:
+                _set_K(model, K)
+                score = float(_loss(_wave(model, n, grid[index]), residual_spectrum, norm))
+                if score < best[0]:
+                    best = (score, grid[index], K)
+        calls += cfg["em_top"] * len(cfg["em_K_grid"])
+        _set_K(model, best[2])
+    optimizer = torch.optim.Adam([model.delay_gain, model.a], lr=cfg["continuous_lr"])
+    for _ in range(cfg["em_refine_steps"]):
+        optimizer.zero_grad()
+        _loss(_wave(model, n, best[1]), residual_spectrum, norm).backward()
+        optimizer.step()
+    calls += cfg["em_refine_steps"]
+    with torch.no_grad():
+        result = (best[1], float(model.scaled_gain()), float(model.scaled_allplus()),
+                  _wave(model, n, best[1]), calls + 1)
+        _set_K(model, K0)
+        _set_a(model, a0)
+    return result
+
+
+def fit_em_backfit(models, target, cfg, log_path=None, init_L=None, start=None, calls=0):
+    """Backfitting: each sweep refits sources on their residual (Feder-Weinstein / SAGE style).
+
+    Sources visit in random order; a refit is kept only if the full-mixture loss drops.
+    After each sweep, pairwise (L, position) exchanges are tried on the same rule.
+    ``start`` is an optional (pairs, K, a) initialization.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, _ = _grids(models)
+    sources = len(models)
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    log = Log(log_path, cfg["log_calls"])
+    with torch.no_grad():
+        if start is None:
+            pairs = _start_pairs(models, grids, init_L)
+        else:
+            pairs = list(start[0])
+            for model, K, a in zip(models, start[1], start[2]):
+                _set_K(model, K)
+                _set_a(model, a)
+        waves = [_wave(m, n, p) for m, p in zip(models, pairs)]
+        current = float(_loss(sum(waves), spectrum, norm))
+    calls += sources
+    sweeps = accepted = 0
+    exhausted = False
+    while not exhausted:
+        for i in torch.randperm(sources).tolist():
+            update = _source_update(models, i, pairs, waves, target, spectrum, cfg, budget, calls)
+            if update is None:
+                exhausted = True
+                break
+            pair, K, a, wave, calls = update
+            trial = list(waves)
+            trial[i] = wave
+            with torch.no_grad():
+                score = float(_loss(sum(trial), spectrum, norm))
+                if score < current:
+                    current, waves, accepted = score, trial, accepted + 1
+                    pairs[i] = pair
+                    _set_K(models[i], K)
+                    _set_a(models[i], a)
+            log(calls, current, pairs, models, force=True)
+        if exhausted:
+            break
+        sweeps += 1
+        with torch.no_grad():
+            for i in range(sources):
+                for j in range(i + 1, sources):
+                    for kind in range(3):  # exchange both, L only, position only
+                        p, q = pairs[i], pairs[j]
+                        swapped = ((q[0] if kind != 2 else p[0], q[1] if kind != 1 else p[1]),
+                                   (p[0] if kind != 2 else q[0], p[1] if kind != 1 else q[1]))
+                        if swapped[0] not in set(grids[i]) or swapped[1] not in set(grids[j]):
+                            continue
+                        trial = list(waves)
+                        trial[i] = _wave(models[i], n, swapped[0])
+                        trial[j] = _wave(models[j], n, swapped[1])
+                        calls += 2
+                        score = float(_loss(sum(trial), spectrum, norm))
+                        if score < current:
+                            current, waves = score, trial
+                            pairs[i], pairs[j] = swapped
+    log.rows.append({"calls": calls, "sweeps": sweeps, "accepted_updates": accepted})
+    return log.rows, _refine(models, pairs, spectrum, cfg, log, calls)
+
+
+def fit_mp_init(models, target, cfg, log_path=None):
+    """Matching pursuit on a coarse K/a grid, then em_backfit on the remaining budget."""
+    n = cfg["n_fft"]
+    residual = target[:n].clone()
+    pairs, gains, allpass, calls = [], [], [], 0
+    with torch.no_grad():
+        for model in models:
+            grid = model.all_pairs()
+            best = (float("inf"), None, None, None, None)
+            for K in cfg["mp_K"]:
+                _set_K(model, K)
+                for a in cfg["mp_a"]:
+                    _set_a(model, a)
+                    for pair in grid:
+                        wave = _wave(model, n, pair)
+                        score = float((residual - wave).square().sum())
+                        if score < best[0]:
+                            best = (score, pair, K, a, wave)
+            calls += len(grid) * len(cfg["mp_K"]) * len(cfg["mp_a"])
+            residual -= best[4]
+            pairs.append(best[1])
+            gains.append(best[2])
+            allpass.append(best[3])
+    return fit_em_backfit(models, target, cfg, log_path, start=(pairs, gains, allpass), calls=calls)
+
+
+def fit_cem_joint(models, target, cfg, log_path=None):
+    """Cross-entropy method: a joint (L, position) table per source, keep-best incumbent."""
+    n, norm, count = cfg["n_fft"], cfg["spectrum_normalization"], cfg["cem_samples"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, _ = _grids(models)
+    sources = len(models)
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    tables = [torch.full((len(grid),), 1 / len(grid)) for grid in grids]
+    positions = [{pair: index for index, pair in enumerate(grid)} for grid in grids]
+    neighbours = [torch.tensor([[positions[i].get((L + dL, p + dp), index)
+                                 for dL in (-1, 0, 1) for dp in (-1, 0, 1)]
+                                for index, (L, p) in enumerate(grid)])
+                  for i, grid in enumerate(grids)]
+    incumbent = [_uniform(grids, i) for i in range(sources)]
+    optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"])
+    log = Log(log_path, cfg["log_calls"])
+    elite_count = max(int(cfg["cem_elite"] * count), 2)
+    calls = 0
+    while calls < budget:
+        with torch.no_grad():
+            draws = [torch.multinomial(table, count, replacement=True) for table in tables]
+            joint = [[grids[i][int(draws[i][s])] for i in range(sources)] for s in range(count)]
+            losses = torch.stack([_loss(_synth(models, n, pairs), spectrum, norm) for pairs in joint])
+            calls += count * sources
+            elite = losses.argsort()[:elite_count]
+            current = _loss(_synth(models, n, incumbent), spectrum, norm)
+            calls += sources
+            if losses[elite[0]] < current:
+                incumbent = joint[int(elite[0])]
+            for i in range(sources):
+                update = torch.zeros_like(tables[i])
+                # Elite mass, spread over the 3x3 (L, position) neighbourhood.
+                spread = neighbours[i][draws[i][elite]].flatten()
+                update.index_add_(0, spread, torch.ones_like(spread, dtype=update.dtype))
+                update /= update.sum()
+                tables[i] = ((1 - cfg["cem_alpha"]) * tables[i] + cfg["cem_alpha"] * update
+                             ) * (1 - cfg["cem_floor"]) + cfg["cem_floor"] / len(grids[i])
+        optimizer.zero_grad()
+        measured = _loss(_synth(models, n, incumbent), spectrum, norm)
+        calls += sources
+        measured.backward()
+        _checked_filtered_step(optimizer, models, "cem_joint", calls)
+        log(calls, measured.detach(), incumbent, models)
+    return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
+
+
+def fit_gibbs_pt(models, target, cfg, log_path=None):
+    """Blocked Gibbs inside parallel tempering: em_backfit's residual scoring, sampled not argmaxed.
+
+    Each update draws source i's (L, position) from softmax(-residual loss / T) over all pairs,
+    with K profiled on em_K_coarse. A block update costs about 30000 syntheses, so the matched
+    budget allows only about 5n updates in all. Returns history whose last row holds the
+    marginal visit counts of the hottest (T = 1) chain.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, _ = _grids(models)
+    sources, temperatures = len(models), cfg["gibbs_temperatures"]
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    log = Log(log_path, cfg["log_calls"])
+    calls = exchanges = exchange_tries = 0
+    with torch.no_grad():
+        chains = []
+        for _ in temperatures:
+            pairs = [_uniform(grids, i) for i in range(sources)]
+            K = [cfg["initial_K"]] * sources
+            waves = []
+            for i in range(sources):
+                _set_K(models[i], K[i])
+                waves.append(_wave(models[i], n, pairs[i]))
+            calls += sources
+            chains.append({"pairs": pairs, "K": K, "waves": waves,
+                           "loss": float(_loss(sum(waves), spectrum, norm))})
+        best = min(chains, key=lambda c: c["loss"])
+        best = {"pairs": list(best["pairs"]), "K": list(best["K"]), "loss": best["loss"]}
+        marginal = [{} for _ in models]
+        cost = len(grids[0]) * len(cfg["em_K_coarse"])
+        while calls + cost <= budget:
+            for chain, T in zip(chains, temperatures):
+                if calls + cost > budget:
+                    break
+                i = int(torch.randint(sources, ()))
+                rest = sum((w for j, w in enumerate(chain["waves"]) if j != i), torch.zeros(n))
+                residual = torch.fft.rfft(target[:n] - rest)
+                grid = grids[i]
+                scores = torch.full((len(grid),), float("inf"))
+                gains = torch.zeros(len(grid))
+                for K in cfg["em_K_coarse"]:
+                    _set_K(models[i], K)
+                    for index, pair in enumerate(grid):
+                        score = float(_loss(_wave(models[i], n, pair), residual, norm))
+                        if score < scores[index]:
+                            scores[index], gains[index] = score, K
+                calls += len(grid) * len(cfg["em_K_coarse"])
+                index = int(torch.multinomial((-(scores - scores.min()) / T).softmax(0), 1))
+                _set_K(models[i], float(gains[index]))
+                chain["pairs"][i], chain["K"][i] = grid[index], float(gains[index])
+                chain["waves"][i] = _wave(models[i], n, grid[index])
+                chain["loss"] = float(_loss(sum(chain["waves"]), spectrum, norm))
+                if T == temperatures[-1]:
+                    key = f"{grid[index][0]},{grid[index][1]}"
+                    marginal[i][key] = marginal[i].get(key, 0) + 1
+                if chain["loss"] < best["loss"]:
+                    best = {"pairs": list(chain["pairs"]), "K": list(chain["K"]), "loss": chain["loss"]}
+            for c in range(len(chains) - 1):
+                exchange_tries += 1
+                delta = (1 / temperatures[c] - 1 / temperatures[c + 1]) * (
+                    chains[c]["loss"] - chains[c + 1]["loss"])
+                if delta >= 0 or float(torch.rand(())) < math.exp(delta):
+                    chains[c], chains[c + 1] = chains[c + 1], chains[c]
+                    exchanges += 1
+            log(calls, best["loss"], best["pairs"], models, force=True)
+        for model, K in zip(models, best["K"]):
+            _set_K(model, K)
+    log.rows.append({"calls": calls, "t1_marginal": marginal, "exchanges": exchanges,
+                     "exchange_tries": exchange_tries, "best_loss": best["loss"]})
+    return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
