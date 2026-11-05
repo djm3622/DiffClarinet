@@ -7,6 +7,7 @@ output/
 tests/
 slurm/
 data/vary_all_triangle/manifest.json
+data/uniform_grid_triangle/manifest.json
 handoff*.md
 data/matlab_triangle/
 
