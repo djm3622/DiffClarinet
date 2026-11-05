@@ -1,5 +1,6 @@
 """Local runner for the opt-in search prototypes on k05 cases (not a paper benchmark)."""
 import argparse
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 from pathlib import Path
@@ -111,7 +112,7 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     true_pairs = [(int(v["L"]), int(v["position"])) for v in truth]
     summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
                "source_syntheses": calls, "found": found, "true": true_pairs,
-               "set_overlap": len(set(found) & set(true_pairs)) / len(true_pairs),
+               "set_overlap": sum((Counter(found) & Counter(true_pairs)).values()) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
                * row["source_count"], "history": history}
     benchmark.write_json(output / "summary.json", summary)
