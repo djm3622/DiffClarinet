@@ -128,6 +128,11 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
         "snr_db": float(10 * torch.log10(target.square().sum() / error.square().sum().clamp_min(1e-30))),
         "fit_window_snr_db": float(10 * torch.log10(
             target[:window].square().sum() / error[:window].square().sum().clamp_min(1e-30))),
+        # Fixed 8,192-sample window and level ratio, comparable across fit-window lengths.
+        "first_8192_snr_db": float(10 * torch.log10(
+            target[:8192].square().sum() / error[:8192].square().sum().clamp_min(1e-30))),
+        "first_8192_level_ratio_db": float(10 * torch.log10(
+            mixture[:8192].square().sum().clamp_min(1e-30) / target[:8192].square().sum())),
         "absolute_log_spectral_mae": float((torch.fft.rfft(mixture).abs().clamp_min(1e-7).log()
                                             - torch.fft.rfft(target).abs().clamp_min(1e-7).log())
                                            .abs().mean()),

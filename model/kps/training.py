@@ -809,9 +809,8 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt"}:
-            raise ValueError("Spectrum normalization must be 'peak', 'none', 'noise_floor' "
-                             "or 'noise_floor_sqrt'.")
+        if self.spectrum_normalization not in SPECTRUM_LOSSES:
+            raise ValueError(f"Spectrum normalization must be one of {sorted(SPECTRUM_LOSSES)}.")
         if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
                 self.spectrum_normalization.startswith("noise_floor")
                 and self.method in {"reinforce", "gumbel"})):
@@ -1039,10 +1038,42 @@ def noise_floor_scale(epoch_index: int, config: "TriangleFitConfig") -> float:
     return config.noise_floor_anneal ** (1.0 - progress)
 
 
+# Multi-scale STFT loss (real-audio pilot): for each resolution r, spectral convergence
+# ||S - S_hat||_F / ||S||_F plus mean |log(S + eps) - log(S_hat + eps)| over Hann-windowed
+# STFT magnitudes (hop = size / 4), averaged over resolutions. Unlike one long rFFT it sees
+# how the spectrum changes over time (decay), and the convergence term weighs loud bins.
+SPECTRUM_LOSSES = {"peak", "none", "noise_floor", "noise_floor_sqrt", "multiscale"}
+MULTISCALE_FFT_SIZES = (4096, 2048, 1024, 512, 256)
+MULTISCALE_EPS = 1e-7
+
+
+def multiscale_spectral_loss(prediction: torch.Tensor, target: torch.Tensor,
+                             fft_sizes: tuple[int, ...] = MULTISCALE_FFT_SIZES,
+                             eps: float = MULTISCALE_EPS) -> torch.Tensor:
+    if prediction.shape != target.shape or prediction.ndim != 1:
+        raise ValueError("Multi-scale loss expects equal-length one-dimensional signals.")
+    terms = []
+    for size in fft_sizes:
+        if size > prediction.numel():
+            raise ValueError(f"STFT size {size} exceeds the {prediction.numel()}-sample window.")
+        window = torch.hann_window(size, dtype=prediction.dtype, device=prediction.device)
+        spectra = [torch.stft(signal, n_fft=size, hop_length=size // 4, window=window,
+                              center=True, return_complex=True).abs()
+                   for signal in (prediction, target)]
+        estimate, reference = spectra
+        convergence = (torch.linalg.norm(reference - estimate)
+                       / torch.linalg.norm(reference).clamp_min(eps))
+        log_magnitude = (torch.log(reference + eps) - torch.log(estimate + eps)).abs().mean()
+        terms.append(convergence + log_magnitude)
+    return torch.stack(terms).mean()
+
+
 def _triangle_spectral_loss(prediction: torch.Tensor,
                             target_spectrum: torch.Tensor,
                             normalization: str,
                             floor_scale: float = 1.0) -> torch.Tensor:
+    if normalization == "multiscale":
+        raise ValueError("The multi-scale loss needs waveforms; this method only has spectra.")
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
     if normalization in {"noise_floor", "noise_floor_sqrt"}:
@@ -1062,6 +1093,10 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
 
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
           normalization: str, floor_scale: float = 1.0) -> torch.Tensor:
+    if normalization == "multiscale":
+        # Every caller passes rfft(target window); invert it to recover the window exactly.
+        target = torch.fft.irfft(target_spectrum, n=prediction.numel())
+        return multiscale_spectral_loss(prediction, target)
     return _triangle_spectral_loss(torch.fft.rfft(prediction),
                                    target_spectrum, normalization, floor_scale)
 
