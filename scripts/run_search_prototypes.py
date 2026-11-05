@@ -25,6 +25,8 @@ SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gr
                 em_K_coarse=[0.6, 0.8, 0.95], em_K_grid=[0.55, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98],
                 em_top=16, em_refine_steps=20, mp_K=[0.6, 0.8, 0.95], mp_a=[0.25, 0.75],
                 cem_samples=64, cem_elite=0.1, cem_alpha=0.3, cem_floor=1e-3,
+                # Matches the median |gradient| of log-spectral at triangle n=1 starts (1.9 vs 5e-4).
+                ot_gradient_scale=3700.0,
                 gibbs_temperatures=[0.05, 0.25, 1.0], gradient_cost=3, mala_step=0.15,
                 grad_window=8, grad_alpha=4.0, data_sharpness=20.0, data_floor=0.05)
 
@@ -91,10 +93,12 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
         history, calls = prototypes.fit_cem_joint(models, target, cfg, progress)
     elif method == "mp_init":
         history, calls = prototypes.fit_mp_init(models, target, cfg, progress)
-    elif method in {"mcmc_grad", "mcmc_grad_noLgrad"}:
+    elif method in {"mcmc_grad", "mcmc_grad_noLgrad", "mcmc_grad_ot"}:
+        # OT drives only the L/position proposal; acceptance stays on the log-spectral loss.
         history, calls = prototypes.fit_mcmc_grad(
-            models, target, {**cfg, "discrete_gradient": method == "mcmc_grad"}, position,
-            [int(v["L"]) for v in truth], progress)
+            models, target, {**cfg, "discrete_gradient": method != "mcmc_grad_noLgrad",
+                             "proposal_loss": "ot" if method == "mcmc_grad_ot" else "log_spectral"},
+            position, [int(v["L"]) for v in truth], progress)
     elif method == "gibbs_pt":
         history, calls = prototypes.fit_gibbs_pt(models, target, cfg, progress)
     else:
@@ -148,7 +152,9 @@ def main() -> None:
                 case = {**row, "method": method,
                         "run_id": row["run_id"].replace("random_search_local", method)}
                 jobs.append((case, config, paths, args.output.resolve(), args.scale))
-    jobs.sort(key=lambda job: (job[0]["method"] in args.extra_methods, -job[0]["source_count"]))
+    jobs.sort(key=lambda job: (args.extra_methods.index(job[0]["method"]) + 1
+                               if job[0]["method"] in args.extra_methods else 0,
+                               -job[0]["source_count"]))
     if args.list_jobs:
         for index, job in enumerate(jobs):
             print(index, job[0]["run_id"], job[0]["method"], job[0]["source_count"])

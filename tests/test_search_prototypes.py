@@ -46,7 +46,9 @@ class PrototypeTests(unittest.TestCase):
                 "mp": lambda m, t, c, pos: p.fit_mp_init(m, t, c),
                 "gibbs": lambda m, t, c, pos: p.fit_gibbs_pt(m, t, c),
                 "mcmc_grad": lambda m, t, c, pos: p.fit_mcmc_grad(m, t, c, pos, [5, 6]),
-                "rs_cached": lambda m, t, c, pos: p.fit_rs_cached(m, t, c)}
+                "rs_cached": lambda m, t, c, pos: p.fit_rs_cached(m, t, c),
+                "mcmc_grad_ot": lambda m, t, c, pos: p.fit_mcmc_grad(
+                    m, t, {**c, "proposal_loss": "ot"}, pos, [5, 6])}
         for name, position, count in product(fits, ("dp", "A"), (1, 2)):
             with self.subTest(name=name, position=position, count=count):
                 torch.manual_seed(1)

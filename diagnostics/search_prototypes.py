@@ -584,10 +584,18 @@ def _fractional_wave(model, n, L, position, kind):
                                          F.pad(numerator, (0, size - 3)), clamp=False)
 
 
-def _delay_gradient(model, rest, spectrum, n, norm, pair, kind):
+def _ot_loss(wave, spectrum):
+    """W1 between normalized magnitude spectra: mean |CDF_model - CDF_target|."""
+    p, q = torch.fft.rfft(wave).abs(), spectrum.abs()
+    return ((p / p.sum()).cumsum(0) - (q / q.sum()).cumsum(0)).abs().mean()
+
+
+def _delay_gradient(model, rest, spectrum, n, norm, pair, kind, proposal_loss="log_spectral",
+                    ot_scale=1.0):
     L = torch.tensor(float(pair[0]), requires_grad=True)
     position = torch.tensor(float(pair[1]), requires_grad=True)
-    loss = _loss(rest + _fractional_wave(model, n, L, position, kind), spectrum, norm)
+    wave = rest + _fractional_wave(model, n, L, position, kind)
+    loss = ot_scale * _ot_loss(wave, spectrum) if proposal_loss == "ot" else _loss(wave, spectrum, norm)
     return [float(g) for g in torch.autograd.grad(loss, (L, position))]
 
 
@@ -739,7 +747,9 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
                 gradient_share = 1 / 3 if cfg.get("discrete_gradient", True) else 0
                 if split < gradient_share:
                     set_state(i, K, a)
-                    g_L, g_p = _delay_gradient(models[i], rest, spectrum, n, norm, pair, kind)
+                    g_L, g_p = _delay_gradient(models[i], rest, spectrum, n, norm, pair, kind,
+                                               cfg.get("proposal_loss", "log_spectral"),
+                                               cfg.get("ot_gradient_scale", 1.0))
                     calls += cfg["gradient_cost"]
                     log_L, log_p = (_langevin_log_probs(g, T, cfg) for g in (g_L, g_p))
                     index_L = int(torch.multinomial(log_L.exp(), 1))
@@ -755,7 +765,9 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
                         counts["gradient"][0] += 1
                         continue
                     set_state(i, K, a)
-                    r_L, r_p = _delay_gradient(models[i], rest, spectrum, n, norm, new, kind)
+                    r_L, r_p = _delay_gradient(models[i], rest, spectrum, n, norm, new, kind,
+                                               cfg.get("proposal_loss", "log_spectral"),
+                                               cfg.get("ot_gradient_scale", 1.0))
                     calls += cfg["gradient_cost"]
                     reverse_L, reverse_p = (_langevin_log_probs(g, T, cfg) for g in (r_L, r_p))
                     window = cfg["grad_window"]
