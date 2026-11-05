@@ -1057,8 +1057,11 @@ def multiscale_spectral_loss(prediction: torch.Tensor, target: torch.Tensor,
         if size > prediction.numel():
             raise ValueError(f"STFT size {size} exceeds the {prediction.numel()}-sample window.")
         window = torch.hann_window(size, dtype=prediction.dtype, device=prediction.device)
-        spectra = [torch.stft(signal, n_fft=size, hop_length=size // 4, window=window,
-                              center=True, return_complex=True).abs()
+        # |X| as sqrt(|X|^2 + eps^2): .abs() has a NaN gradient at (sub)denormal bins,
+        # which long windows reach once a fast-decaying source falls below ~1e-38.
+        spectra = [torch.view_as_real(torch.stft(
+                       signal, n_fft=size, hop_length=size // 4, window=window,
+                       center=True, return_complex=True)).square().sum(-1).add(eps * eps).sqrt()
                    for signal in (prediction, target)]
         estimate, reference = spectra
         convergence = (torch.linalg.norm(reference - estimate)
