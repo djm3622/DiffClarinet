@@ -735,7 +735,9 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
             else:
                 rest = rest_of(chain, i)
                 split = float(torch.rand(()))
-                if split < 1 / 3:
+                # The ablation drops gradient (L, position) moves; local and data split evenly.
+                gradient_share = 1 / 3 if cfg.get("discrete_gradient", True) else 0
+                if split < gradient_share:
                     set_state(i, K, a)
                     g_L, g_p = _delay_gradient(models[i], rest, spectrum, n, norm, pair, kind)
                     calls += cfg["gradient_cost"]
@@ -760,7 +762,7 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
                     log_ratio = float(reverse_L[window - delta_L] + reverse_p[window - delta_p]
                                       - log_L[index_L] - log_p[index_p])
                     consider(chain, T, "gradient", {i: (new, K, a)}, log_ratio)
-                elif split < 2 / 3:
+                elif split < (1 + gradient_share) / 2:
                     if float(torch.rand(())) < cfg["local_probability"]:
                         step = torch.randint(-cfg["local_radius"], cfg["local_radius"] + 1, (2,)).tolist()
                         new = (pair[0] + step[0], pair[1] + step[1])
