@@ -130,6 +130,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--scale", type=float, default=1.0, help="Budget multiplier, for smoke tests")
+    parser.add_argument("--job-index", type=int, help="Run this one fit of the job list (Slurm arrays)")
+    parser.add_argument("--list-jobs", action="store_true", help="Print index and run_id of every fit")
     args = parser.parse_args()
     config = benchmark.read_config(benchmark.ROOT / CONFIG, [])
     plan, inventories = benchmark.make_plan(config)
@@ -143,6 +145,13 @@ def main() -> None:
                         "run_id": row["run_id"].replace("random_search_local", method)}
                 jobs.append((case, config, paths, args.output.resolve(), args.scale))
     jobs.sort(key=lambda job: -job[0]["source_count"])
+    if args.list_jobs:
+        for index, job in enumerate(jobs):
+            print(index, job[0]["run_id"], job[0]["method"], job[0]["source_count"])
+        return
+    if args.job_index is not None:
+        print(safe_case(*jobs[args.job_index]), flush=True)
+        return
     print(f"{len(jobs)} fits", flush=True)
     with ProcessPoolExecutor(args.workers) as pool:
         futures = [pool.submit(safe_case, *job) for job in jobs]
