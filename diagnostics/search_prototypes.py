@@ -795,3 +795,53 @@ def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
     log.rows.append({"calls": calls, "moves_tried_accepted": counts,
                      "gradient_toward_true_L": direction})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
+
+
+def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
+    """random_search_local with cached sources: a proposal re-synthesizes only what it changes.
+
+    Same proposal distribution, keep-best rule and per-update Adam step on K/a. Charged as in
+    fit_mcmc_grad: one synthesis per changed source, cfg["gradient_cost"] per source gradient.
+    K/a move every update, so each update re-renders the n sources with gradients.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, valid = _grids(models)
+    sources = len(models)
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    incumbent = [_uniform(grids, i) for i in range(sources)]
+    optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"])
+    log = Log(log_path, cfg["log_calls"])
+    calls = updates = 0
+    while calls < budget:
+        optimizer.zero_grad()
+        waves = [_wave(m, n, p) for m, p in zip(models, incumbent)]
+        calls += cfg["gradient_cost"] * sources
+        with torch.no_grad():
+            total = sum(w.detach() for w in waves)
+            best_score, best = float(_loss(total, spectrum, norm)), None
+            for _ in range(cfg["samples"] - 1):
+                candidate = propose(grids, valid, incumbent, cfg)
+                changed = [i for i, (a, b) in enumerate(zip(candidate, incumbent)) if a != b]
+                if not changed:
+                    continue
+                trial = total
+                for i in changed:
+                    trial = trial - waves[i].detach() + _wave(models[i], n, candidate[i])
+                calls += len(changed)
+                score = float(_loss(trial, spectrum, norm))
+                if score < best_score:
+                    best_score, best = score, (candidate, changed)
+        if best is not None:
+            incumbent = best[0]
+            for i in best[1]:
+                waves[i] = _wave(models[i], n, incumbent[i])
+            calls += len(best[1])
+        measured = _loss(sum(waves), spectrum, norm)
+        measured.backward()
+        _checked_filtered_step(optimizer, models, "rs_cached", updates)
+        updates += 1
+        log(calls, measured.detach(), incumbent, models)
+    log.rows.append({"calls": calls, "updates": updates})
+    return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
+

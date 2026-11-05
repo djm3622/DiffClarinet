@@ -74,6 +74,8 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     start = time.perf_counter()
     if method == "rs_swap":
         history, calls = fit_random_search(models, target, cfg, progress)
+    elif method == "rs_cached":
+        history, calls = prototypes.fit_rs_cached(models, target, cfg, progress)
     elif method == "rs_kprofile":
         history, calls = prototypes.fit_rs_kprofile(models, target, cfg, progress)
     elif method == "reinforce_elitist":
@@ -132,6 +134,8 @@ def main() -> None:
     parser.add_argument("--scale", type=float, default=1.0, help="Budget multiplier, for smoke tests")
     parser.add_argument("--job-index", type=int, help="Run this one fit of the job list (Slurm arrays)")
     parser.add_argument("--list-jobs", action="store_true", help="Print index and run_id of every fit")
+    parser.add_argument("--extra-methods", nargs="*", default=[],
+                        help="Appended after --methods, so earlier job indices do not move")
     args = parser.parse_args()
     config = benchmark.read_config(benchmark.ROOT / CONFIG, [])
     plan, inventories = benchmark.make_plan(config)
@@ -140,11 +144,11 @@ def main() -> None:
         if (row["filter"] in args.filters and row["source_count"] in args.counts
                 and row["instance"] < args.instances and row["seed"] == args.seed):
             paths = [inventories[row["filter"]][i] for i in json.loads(row["indices"])]
-            for method in args.methods:
+            for method in [*args.methods, *args.extra_methods]:
                 case = {**row, "method": method,
                         "run_id": row["run_id"].replace("random_search_local", method)}
                 jobs.append((case, config, paths, args.output.resolve(), args.scale))
-    jobs.sort(key=lambda job: -job[0]["source_count"])
+    jobs.sort(key=lambda job: (job[0]["method"] in args.extra_methods, -job[0]["source_count"]))
     if args.list_jobs:
         for index, job in enumerate(jobs):
             print(index, job[0]["run_id"], job[0]["method"], job[0]["source_count"])

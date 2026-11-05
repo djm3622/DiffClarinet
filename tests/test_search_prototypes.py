@@ -45,7 +45,8 @@ class PrototypeTests(unittest.TestCase):
                 "cem": lambda m, t, c, pos: p.fit_cem_joint(m, t, c),
                 "mp": lambda m, t, c, pos: p.fit_mp_init(m, t, c),
                 "gibbs": lambda m, t, c, pos: p.fit_gibbs_pt(m, t, c),
-                "mcmc_grad": lambda m, t, c, pos: p.fit_mcmc_grad(m, t, c, pos, [5, 6])}
+                "mcmc_grad": lambda m, t, c, pos: p.fit_mcmc_grad(m, t, c, pos, [5, 6]),
+                "rs_cached": lambda m, t, c, pos: p.fit_rs_cached(m, t, c)}
         for name, position, count in product(fits, ("dp", "A"), (1, 2)):
             with self.subTest(name=name, position=position, count=count):
                 torch.manual_seed(1)
@@ -59,6 +60,17 @@ class PrototypeTests(unittest.TestCase):
                 self.assertTrue(history)
                 for model in models:
                     self.assertTrue(torch.isfinite(model.scaled_gain()))
+
+    def test_rs_cached_charges_one_synthesis_per_changed_source(self) -> None:
+        torch.manual_seed(4)
+        models = nn.ModuleList(make_source("dp") for _ in range(3))
+        target = _synth(models, 32, [(5, 2), (6, 3), (5, 3)]).detach()
+        settings = cfg(epochs=40, refine_epochs=1)
+        history, _ = p.fit_rs_cached(models, target, settings)
+        last = next(row for row in reversed(history) if "updates" in row)
+        # Per update: 3 sources at gradient cost 3, at most 3 proposals, 1 accepted re-render.
+        self.assertGreater(last["updates"], 40 * 4 * 3 / (9 + 3 + 1) - 1)
+        self.assertLess(last["updates"], 40 * 4 * 3 / 9 + 1)
 
     def test_em_backfit_recovers_an_easy_mixture(self) -> None:
         torch.manual_seed(2)
