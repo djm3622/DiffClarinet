@@ -17,14 +17,15 @@ from scripts.eval.source_baselines import loop_pitch, multipitch_klapuri
 
 CONFIG = "configs/delay_benchmark_random_search_local_full.yaml"
 METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", "mcmc_pt",
-           "em_backfit", "em_backfit_klapuri", "cem_joint", "mp_init", "gibbs_pt")
+           "em_backfit", "em_backfit_klapuri", "cem_joint", "mp_init", "gibbs_pt", "mcmc_grad")
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
                 swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
                 em_K_coarse=[0.6, 0.8, 0.95], em_K_grid=[0.55, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98],
                 em_top=16, em_refine_steps=20, mp_K=[0.6, 0.8, 0.95], mp_a=[0.25, 0.75],
                 cem_samples=64, cem_elite=0.1, cem_alpha=0.3, cem_floor=1e-3,
-                gibbs_temperatures=[0.05, 0.25, 1.0])
+                gibbs_temperatures=[0.05, 0.25, 1.0], gradient_cost=3, mala_step=0.15,
+                grad_window=8, grad_alpha=4.0, data_sharpness=20.0, data_floor=0.05)
 
 
 def settings(config: dict, scale: float = 1.0) -> dict:
@@ -87,6 +88,9 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
         history, calls = prototypes.fit_cem_joint(models, target, cfg, progress)
     elif method == "mp_init":
         history, calls = prototypes.fit_mp_init(models, target, cfg, progress)
+    elif method == "mcmc_grad":
+        history, calls = prototypes.fit_mcmc_grad(models, target, cfg, position,
+                                                  [int(v["L"]) for v in truth], progress)
     elif method == "gibbs_pt":
         history, calls = prototypes.fit_gibbs_pt(models, target, cfg, progress)
     else:

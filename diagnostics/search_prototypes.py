@@ -10,8 +10,11 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from torch.nn import functional as F
+import torchaudio
 
 from diagnostics.random_search import _uniform, propose
+from model.kps.fractional_delay import delayed_loop_filter
 from model.kps.training import (_checked_filtered_step, _continuous_parameters, _loss, _synth,
                                 _triangle_regularization)
 
@@ -561,4 +564,232 @@ def fit_gibbs_pt(models, target, cfg, log_path=None):
             _set_K(model, K)
     log.rows.append({"calls": calls, "t1_marginal": marginal, "exchanges": exchanges,
                      "exchange_tries": exchange_tries, "best_loss": best["loss"]})
+    return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
+
+
+def _fractional_wave(model, n, L, position, kind):
+    """Causal source at fractional L/position via the Lagrange delay, differentiable in both."""
+    size = int(torch.maximum(L, position).detach().floor()) + 8
+    K, a = model.scaled_gain(), model.scaled_allplus()
+    numerator = torch.stack((a / 2, (a + 1) / 2, a * 0 + 0.5))
+    denominator = (F.pad(torch.stack((a * 0 + 1, a)), (0, size - 2))
+                   - K * delayed_loop_filter(numerator, L, size))
+    if kind == "dp":
+        b = -K * (F.pad(numerator, (0, size - 3)) - delayed_loop_filter(numerator, position, size))
+        impulse = L.new_zeros(n)
+        impulse[0] = 1
+        return torchaudio.functional.lfilter(impulse, denominator, b, clamp=False)
+    excitation = model.excitation(n, model.L_logits.new_ones(1), L, position, K)
+    return torchaudio.functional.lfilter(excitation, denominator,
+                                         F.pad(numerator, (0, size - 3)), clamp=False)
+
+
+def _delay_gradient(model, rest, spectrum, n, norm, pair, kind):
+    L = torch.tensor(float(pair[0]), requires_grad=True)
+    position = torch.tensor(float(pair[1]), requires_grad=True)
+    loss = _loss(rest + _fractional_wave(model, n, L, position, kind), spectrum, norm)
+    return [float(g) for g in torch.autograd.grad(loss, (L, position))]
+
+
+def _gain_gradient(model, rest, spectrum, n, norm, pair):
+    loss = _loss(rest + _wave(model, n, pair), spectrum, norm)
+    return [float(g) for g in torch.autograd.grad(loss, (model.delay_gain, model.a))]
+
+
+def _langevin_log_probs(gradient: float, temperature: float, cfg) -> torch.Tensor:
+    """log q(delta) over the window, proportional to exp(-g delta / 2T - delta^2 / 2 alpha)."""
+    window = torch.arange(-cfg["grad_window"], cfg["grad_window"] + 1, dtype=torch.float64)
+    return (-0.5 * gradient / temperature * window - window.square() / (2 * cfg["grad_alpha"])
+            ).log_softmax(0)
+
+
+def _data_tables(residual: torch.Tensor, L_values, p_values, cfg):
+    """Proposal tables from the residual: autocorrelation peaks for L, cepstral peaks for position.
+
+    A floor keeps every value reachable, so the Metropolis ratio stays valid.
+    """
+    spectrum = torch.fft.rfft(residual)
+    autocorrelation = torch.fft.irfft(spectrum.abs().square())
+    autocorrelation = autocorrelation / autocorrelation[0].clamp_min(1e-30)
+    cepstrum = torch.fft.irfft(spectrum.abs().clamp_min(1e-7).log()).abs()
+    # The all-pass adds roughly one sample to the loop, so period L + 1 maps to delay L.
+    L_scores = autocorrelation[torch.tensor(L_values) + 1]
+    p_scores = cepstrum[torch.tensor(p_values)]
+    L_table = (cfg["data_sharpness"] * L_scores).softmax(0)
+    p_table = (cfg["data_sharpness"] * p_scores / p_scores.max().clamp_min(1e-12)).softmax(0)
+    floor = cfg["data_floor"]
+    return ((1 - floor) * L_table + floor / len(L_values),
+            (1 - floor) * p_table + floor / len(p_values))
+
+
+def fit_mcmc_grad(models, target, cfg, kind, truth_L=None, log_path=None):
+    """Parallel tempering with gradient-informed moves; never enumerates a source's grid.
+
+    Moves on one source: MALA on (logit K, logit a); discrete Langevin on (L, position) from
+    the Lagrange fractional-delay gradient; the +/- local step or redraw; a data-driven proposal
+    from the residual; and source swaps. All carry a Metropolis-Hastings correction. A gradient
+    evaluation is charged cfg["gradient_cost"] syntheses. truth_L is used only for diagnostics.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, valid = _grids(models)
+    sources, temperatures = len(models), cfg["temperatures"]
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    log = Log(log_path, cfg["log_calls"])
+    L_values = sorted({pair[0] for pair in grids[0]})
+    p_values = sorted({pair[1] for pair in grids[0]})
+    L_index = {L: i for i, L in enumerate(L_values)}
+    p_index = {p: i for i, p in enumerate(p_values)}
+    counts = {move: [0, 0] for move in ("mala", "gradient", "local", "data", "swap", "exchange")}
+    direction = [0, 0]  # gradient L proposals pointing toward the nearest true L; nonzero moves
+    calls = sweep = 0
+
+    def set_state(i, K, a):
+        with torch.no_grad():
+            _set_K(models[i], K)
+            _set_a(models[i], a)
+
+    def synth(i, pair, K, a):
+        set_state(i, K, a)
+        with torch.no_grad():
+            return _wave(models[i], n, pair)
+
+    def score(waves):
+        with torch.no_grad():
+            return float(_loss(sum(waves), spectrum, norm))
+
+    def logit(x):
+        return math.log(x / (1 - x))
+
+    def rest_of(chain, i):
+        return sum((w for j, w in enumerate(chain["waves"]) if j != i), torch.zeros(n)).detach()
+
+    chains = []
+    for _ in temperatures:
+        pairs = [_uniform(grids, i) for i in range(sources)]
+        K, a = [cfg["initial_K"]] * sources, [cfg["initial_a"]] * sources
+        waves = [synth(i, pairs[i], K[i], a[i]) for i in range(sources)]
+        calls += sources
+        chains.append({"pairs": pairs, "K": K, "a": a, "waves": waves, "loss": score(waves)})
+    first = min(chains, key=lambda c: c["loss"])
+    best = {"pairs": list(first["pairs"]), "K": list(first["K"]), "a": list(first["a"]), "loss": first["loss"]}
+
+    def consider(chain, T, move, changed, log_ratio=0.0):
+        nonlocal best, calls
+        counts[move][0] += 1
+        if not changed:
+            return
+        waves = list(chain["waves"])
+        for index, (pair, K, a) in changed.items():
+            waves[index] = synth(index, pair, K, a)
+        calls += len(changed)
+        loss = score(waves)
+        accept = (chain["loss"] - loss) / T + log_ratio
+        if accept >= 0 or float(torch.rand(())) < math.exp(accept):
+            counts[move][1] += 1
+            for index, (pair, K, a) in changed.items():
+                chain["pairs"][index], chain["K"][index], chain["a"][index] = pair, K, a
+            chain["waves"], chain["loss"] = waves, loss
+            if loss < best["loss"]:
+                best = {"pairs": list(chain["pairs"]), "K": list(chain["K"]),
+                        "a": list(chain["a"]), "loss": loss}
+
+    while calls < budget:
+        for chain, T in zip(chains, temperatures):
+            i = int(torch.randint(sources, ()))
+            pair, K, a = chain["pairs"][i], chain["K"][i], chain["a"][i]
+            draw = float(torch.rand(()))
+            if draw < cfg["swap_move"] and sources > 1:
+                j = int(torch.randint(sources - 1, ()))
+                j += j >= i
+                choice = int(torch.randint(3, ()))
+                p, q = chain["pairs"][i], chain["pairs"][j]
+                new_i = (q[0] if choice != 1 else p[0], q[1] if choice != 0 else p[1])
+                new_j = (p[0] if choice != 1 else q[0], p[1] if choice != 0 else q[1])
+                changed = ({i: (new_i, chain["K"][i], chain["a"][i]), j: (new_j, chain["K"][j], chain["a"][j])}
+                           if new_i in valid[i] and new_j in valid[j] else {})
+                consider(chain, T, "swap", changed)
+            elif draw < cfg["swap_move"] + cfg["continuous_move"]:
+                # MALA in logit coordinates, with the reverse density at the proposal.
+                rest = rest_of(chain, i)
+                set_state(i, K, a)
+                gradient = _gain_gradient(models[i], rest, spectrum, n, norm, pair)
+                calls += cfg["gradient_cost"]
+                unit = (K - models[i].gain_min) / (models[i].gain_max - models[i].gain_min)
+                u, step = (logit(unit), logit(a)), cfg["mala_step"]
+                mean = [x - step ** 2 / 2 * g / T for x, g in zip(u, gradient)]
+                new = [m + step * float(torch.randn(())) for m in mean]
+                K_new = models[i].gain_min + (models[i].gain_max - models[i].gain_min) / (1 + math.exp(-new[0]))
+                a_new = 1 / (1 + math.exp(-new[1]))
+                if not (1e-4 < a_new < 1 - 1e-4 and models[i].gain_min + 1e-4 < K_new < models[i].gain_max - 1e-4):
+                    counts["mala"][0] += 1
+                    continue
+                set_state(i, K_new, a_new)
+                reverse = _gain_gradient(models[i], rest, spectrum, n, norm, pair)
+                calls += cfg["gradient_cost"]
+                set_state(i, K, a)
+                back = [x - step ** 2 / 2 * g / T for x, g in zip(new, reverse)]
+                log_ratio = (sum((x - m) ** 2 for x, m in zip(new, mean))
+                             - sum((x - m) ** 2 for x, m in zip(u, back))) / (2 * step ** 2)
+                consider(chain, T, "mala", {i: (pair, K_new, a_new)}, log_ratio)
+            else:
+                rest = rest_of(chain, i)
+                split = float(torch.rand(()))
+                if split < 1 / 3:
+                    set_state(i, K, a)
+                    g_L, g_p = _delay_gradient(models[i], rest, spectrum, n, norm, pair, kind)
+                    calls += cfg["gradient_cost"]
+                    log_L, log_p = (_langevin_log_probs(g, T, cfg) for g in (g_L, g_p))
+                    index_L = int(torch.multinomial(log_L.exp(), 1))
+                    index_p = int(torch.multinomial(log_p.exp(), 1))
+                    delta_L, delta_p = index_L - cfg["grad_window"], index_p - cfg["grad_window"]
+                    new = (pair[0] + delta_L, pair[1] + delta_p)
+                    if truth_L is not None and delta_L:
+                        nearest = min(truth_L, key=lambda L: abs(L - pair[0]))
+                        if nearest != pair[0]:
+                            direction[1] += 1
+                            direction[0] += (delta_L > 0) == (nearest > pair[0])
+                    if new == pair or new not in valid[i]:
+                        counts["gradient"][0] += 1
+                        continue
+                    set_state(i, K, a)
+                    r_L, r_p = _delay_gradient(models[i], rest, spectrum, n, norm, new, kind)
+                    calls += cfg["gradient_cost"]
+                    reverse_L, reverse_p = (_langevin_log_probs(g, T, cfg) for g in (r_L, r_p))
+                    window = cfg["grad_window"]
+                    log_ratio = float(reverse_L[window - delta_L] + reverse_p[window - delta_p]
+                                      - log_L[index_L] - log_p[index_p])
+                    consider(chain, T, "gradient", {i: (new, K, a)}, log_ratio)
+                elif split < 2 / 3:
+                    if float(torch.rand(())) < cfg["local_probability"]:
+                        step = torch.randint(-cfg["local_radius"], cfg["local_radius"] + 1, (2,)).tolist()
+                        new = (pair[0] + step[0], pair[1] + step[1])
+                    else:
+                        new = _uniform(grids, i)
+                    consider(chain, T, "local",
+                             {i: (new, K, a)} if new in valid[i] and new != pair else {})
+                else:
+                    L_table, p_table = _data_tables(target[:n] - rest, L_values, p_values, cfg)
+                    new = (L_values[int(torch.multinomial(L_table, 1))],
+                           p_values[int(torch.multinomial(p_table, 1))])
+                    if new in valid[i] and new != pair:
+                        log_ratio = float(L_table[L_index[pair[0]]].log() + p_table[p_index[pair[1]]].log()
+                                          - L_table[L_index[new[0]]].log() - p_table[p_index[new[1]]].log())
+                        consider(chain, T, "data", {i: (new, K, a)}, log_ratio)
+                    else:
+                        counts["data"][0] += 1
+        sweep += 1
+        if sweep % cfg["exchange_every"] == 0:
+            for c in range(len(chains) - 1):
+                counts["exchange"][0] += 1
+                delta = (1 / temperatures[c] - 1 / temperatures[c + 1]) * (
+                    chains[c]["loss"] - chains[c + 1]["loss"])
+                if delta >= 0 or float(torch.rand(())) < math.exp(delta):
+                    chains[c], chains[c + 1] = chains[c + 1], chains[c]
+                    counts["exchange"][1] += 1
+        log(calls, best["loss"], best["pairs"], models)
+    for i in range(sources):
+        set_state(i, best["K"][i], best["a"][i])
+    log.rows.append({"calls": calls, "moves_tried_accepted": counts,
+                     "gradient_toward_true_L": direction})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)

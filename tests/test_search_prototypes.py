@@ -18,7 +18,7 @@ def cfg(**extra) -> dict:
             "continuous_lr": .01, "discrete_lr": .003, "spectrum_normalization": "none", "log_every": 5,
             "log_calls": 50, "local_radius": 1, "local_probability": .5, "prior_start": .05,
             "prior_end": .001, "prior_anneal_epochs": 60, "smoothness": 1e-4, "advantage_clip": 5.0,
-            "initial_K": .8, "initial_a": .2, **extra}
+            "initial_K": .8, "initial_a": .2, "gradient_cost": 3, **extra}
 
 
 class PrototypeTests(unittest.TestCase):
@@ -44,7 +44,8 @@ class PrototypeTests(unittest.TestCase):
                 "em_seeded": lambda m, t, c, pos: p.fit_em_backfit(m, t, c, init_L=[5]),
                 "cem": lambda m, t, c, pos: p.fit_cem_joint(m, t, c),
                 "mp": lambda m, t, c, pos: p.fit_mp_init(m, t, c),
-                "gibbs": lambda m, t, c, pos: p.fit_gibbs_pt(m, t, c)}
+                "gibbs": lambda m, t, c, pos: p.fit_gibbs_pt(m, t, c),
+                "mcmc_grad": lambda m, t, c, pos: p.fit_mcmc_grad(m, t, c, pos, [5, 6])}
         for name, position, count in product(fits, ("dp", "A"), (1, 2)):
             with self.subTest(name=name, position=position, count=count):
                 torch.manual_seed(1)
