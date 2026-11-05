@@ -460,11 +460,22 @@ def evaluate(
     return metrics, matches
 
 
+def case_seed(row: dict) -> int:
+    """Initialization seed from (seed, instance, source count, excitation)."""
+    key = f"{row['seed']}:{row['instance']}:{row['source_count']}:{row['filter']}"
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little")
+
+
 def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
     seed = row["seed"]
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # Opt-in: random continuous-delay starts differ per case, not only per seed.
+    case_scope = (config["model"].get("init_seed_scope") == "case"
+                  and row["method"] in CONTINUOUS_DELAY_FAMILIES)
+    if case_scope:
+        torch.manual_seed(case_seed(row))
     models = make_models(config, row["filter"], row["method"], row["source_count"])
     stems, truth, rate = load_case(row["filter"], paths, config)
     fit_config = filtered_config(config, row["method"])
@@ -478,6 +489,8 @@ def fit_case(row: dict, config: dict, paths: list[Path], output: Path) -> dict:
                 model.position_parameter.uniform_(
                     settings["position_min"],
                     min(settings["position_max"], values["L"] - 1))
+    if case_scope:
+        torch.manual_seed(seed)
     # Check joint-search cost before expensive synthesis. Pitch uses precisely
     # the same mixture-only peak restriction as the existing implementation.
     search_size = None

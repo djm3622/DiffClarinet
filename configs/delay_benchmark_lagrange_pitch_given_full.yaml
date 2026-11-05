@@ -35,6 +35,7 @@ model:
   gain_min: 0.5
   gain_max: 1.0
   relaxation_initialization: random
+  init_seed_scope: case
   initial_position: null
 fit:
   epochs: 20000

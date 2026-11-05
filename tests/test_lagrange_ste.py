@@ -150,6 +150,39 @@ class LagrangeSTETest(unittest.TestCase):
                     L, position = m.selected_delays()
                     self.assertTrue(100 <= L <= 200 and 1 <= position < L, (L, position))
 
+    def test_case_scope_starts_differ_by_instance_and_reproduce(self):
+        config = benchmark.read_config(
+            benchmark.ROOT / "configs/delay_benchmark_lagrange_ste_random_init_full.yaml",
+            ["fit.epochs=1", "fit.refine_epochs=1"])
+        plan, inventories = benchmark.make_plan(config)
+        rows = [r for r in plan if r["filter"] == "comb" and r["source_count"] == 1
+                and r["seed"] == 0 and r["method"] == "lagrange"][:4]
+        starts = {}
+        original = benchmark.make_models
+
+        def capture(*args):
+            models = original(*args)
+            starts.setdefault(len(starts), [(float(m.delay_len_parameter.detach()),
+                                             float(m.position_parameter.detach())) for m in models])
+            return models
+
+        benchmark.make_models = capture
+        try:
+            for row in [*rows, rows[0]]:
+                paths = [inventories["comb"][i] for i in json.loads(row["indices"])]
+                with tempfile.TemporaryDirectory() as directory:
+                    benchmark.fit_case(row, config, paths, Path(directory))
+        finally:
+            benchmark.make_models = original
+        self.assertEqual(len({tuple(starts[i]) for i in range(4)}), 4)
+        self.assertEqual(starts[0], starts[4])
+        for L, position in starts[0]:
+            self.assertTrue(100 <= L <= 200 and 1 <= position < L)
+
+    def test_case_scope_leaves_other_configs_on_the_shared_seed(self):
+        config = benchmark.read_config(RANDOM_INIT, ["fit.epochs=1", "fit.refine_epochs=1"])
+        self.assertNotIn("init_seed_scope", config["model"])
+
     def test_pitch_given_fit_keeps_true_L(self):
         for kind in ("comb", "triangle"):
             config = benchmark.read_config(
