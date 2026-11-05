@@ -103,7 +103,7 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
                                           models, truth, paths, output, rate)
     found = [model.selected_delays() for model in models]
     true_pairs = [(int(v["L"]), int(v["position"])) for v in truth]
-    summary = {**row, "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
+    summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
                "source_syntheses": calls, "found": found, "true": true_pairs,
                "set_overlap": len(set(found) & set(true_pairs)) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
