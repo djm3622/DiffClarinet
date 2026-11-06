@@ -809,7 +809,9 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in SPECTRUM_LOSSES:
+        if self.spectrum_normalization.startswith("energy"):
+            energy_loss_options(self.spectrum_normalization)
+        elif self.spectrum_normalization not in SPECTRUM_LOSSES:
             raise ValueError(f"Spectrum normalization must be one of {sorted(SPECTRUM_LOSSES)}.")
         if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
                 self.spectrum_normalization.startswith("noise_floor")
@@ -1071,12 +1073,40 @@ def multiscale_spectral_loss(prediction: torch.Tensor, target: torch.Tensor,
     return torch.stack(terms).mean()
 
 
+# Energy-weighted loss (real audio): sum_k w_k |log|Y_k| - log|X_k||, with weights from the
+# target, w_k = (1 - lam) / N + lam |X_k|^gamma / sum |X|^gamma, so the few bins that hold
+# the energy of a real note outweigh the many between them. lam = 0 is the plain "none"
+# loss. Spelled energy[:lam=0.9][:gamma=2].
+def energy_loss_options(normalization: str) -> dict:
+    name, *fields = normalization.split(":")
+    options = {"lam": 0.9, "gamma": 2.0}
+    if name != "energy":
+        raise ValueError(f"Not an energy loss: {normalization}")
+    for key, value in (entry.split("=") for entry in fields):
+        if key not in options:
+            raise ValueError(f"Unknown energy loss option: {key}")
+        options[key] = float(value)
+    if not 0 <= options["lam"] <= 1 or options["gamma"] <= 0:
+        raise ValueError("Energy loss needs lam in [0, 1] and gamma > 0.")
+    return options
+
+
+def energy_weights(target_spectrum: torch.Tensor, lam: float, gamma: float) -> torch.Tensor:
+    weight = target_spectrum.abs().pow(gamma)
+    return (1 - lam) / weight.numel() + lam * weight / weight.sum()
+
+
 def _triangle_spectral_loss(prediction: torch.Tensor,
                             target_spectrum: torch.Tensor,
                             normalization: str,
                             floor_scale: float = 1.0) -> torch.Tensor:
     if normalization == "multiscale":
         raise ValueError("The multi-scale loss needs waveforms; this method only has spectra.")
+    if normalization.startswith("energy"):
+        options = energy_loss_options(normalization)
+        difference = (to_log_mag(prediction, rel_to_max=False)
+                      - to_log_mag(target_spectrum, rel_to_max=False)).abs()
+        return (energy_weights(target_spectrum, options["lam"], options["gamma"]) * difference).sum()
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
     if normalization in {"noise_floor", "noise_floor_sqrt"}:

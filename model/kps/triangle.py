@@ -8,6 +8,10 @@ from .dkps_fixed import KarplusStrongFixed
 from .relaxation_pair import ContinuousDelayPairMixin
 
 
+# Pole of (1 - z^-1) / (1 - R z^-1); 0.995 puts the corner near 18 Hz at 22025 Hz.
+OUTPUT_DC_POLES = {"none": None, "dc_block": 0.995, "velocity": 0.0}
+
+
 def triangle(n_samples: int, L: int | torch.Tensor,
              A: int | torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     """Unit-height, zero-based triangle supported on [0, L]."""
@@ -27,14 +31,19 @@ class KarplusStrongTriangle(KarplusStrongFixed):
 
     ``output_gain_learnable`` adds an output (loudness) gain g = exp(log_output_gain),
     initialized to 1, for targets whose level K cannot match (real audio). Off,
-    the output is exactly the MATLAB model (g = 1).
+    the output is exactly the MATLAB model (g = 1). ``output_dc`` removes the
+    excitation's mean, which the loop holds at about 1 / (1 - K) and real notes do
+    not have: ``dc_block`` is a one-zero one-pole highpass, ``velocity`` a first
+    difference (also turns the 1/k^2 harmonic tilt into 1/k). ``none`` is the MATLAB model.
     """
 
     def __init__(self, delay_len_min: int, delay_len_max: int,
                  A_min: int, A_max: int, output_gain_learnable: bool = False,
-                 **kwargs) -> None:
+                 output_dc: str = "none", **kwargs) -> None:
         if delay_len_min < 2 or delay_len_max < delay_len_min:
             raise ValueError("Invalid L candidate bounds.")
+        if output_dc not in OUTPUT_DC_POLES:
+            raise ValueError(f"output_dc must be one of {sorted(OUTPUT_DC_POLES)}.")
         if A_min < 1 or A_max < A_min or A_min >= delay_len_max:
             raise ValueError("Invalid A candidate bounds.")
         super().__init__(delay_len=delay_len_min, **kwargs)
@@ -51,6 +60,7 @@ class KarplusStrongTriangle(KarplusStrongFixed):
             raise ValueError("Candidate grid contains no valid (L, A) pair.")
         if output_gain_learnable:
             self.log_output_gain = nn.Parameter(torch.zeros(()))
+        self.dc_pole = OUTPUT_DC_POLES[output_dc]
 
     def output_gain(self) -> torch.Tensor | float:
         gain = getattr(self, "log_output_gain", None)
@@ -129,6 +139,8 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         numerator = a / 2 + (a + 1) / 2 * z.pow(-1) + 0.5 * z.pow(-2)
         denominator = 1 + a * z.pow(-1) - K * numerator * z.pow(-L)
         response = torch.fft.rfft(excitation) * numerator / denominator
+        if self.dc_pole is not None:
+            response = response * (1 - z.pow(-1)) / (1 - self.dc_pole * z.pow(-1))
         return response * self.output_gain() if hasattr(self, "log_output_gain") else response
 
     def time_domain_synth(self, n_samples: int, unit_impulse: torch.Tensor,
@@ -152,6 +164,10 @@ class KarplusStrongTriangle(KarplusStrongFixed):
         denominator[1] = a
         denominator[L:L + 3] -= K * numerator
         output = torchaudio.functional.lfilter(excitation, denominator, b, clamp=False)
+        if self.dc_pole is not None:
+            output = torchaudio.functional.lfilter(
+                output, output.new_tensor([1.0, -self.dc_pole]), output.new_tensor([1.0, -1.0]),
+                clamp=False)
         if not bool(torch.isfinite(output).all()):
             raise FloatingPointError("Nonfinite causal triangle output.")
         return output * self.output_gain() if hasattr(self, "log_output_gain") else output

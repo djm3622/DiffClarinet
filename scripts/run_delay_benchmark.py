@@ -266,6 +266,11 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
         if method == "relaxation":
             raise ValueError("A learned output gain is implemented for the integer-pair models.")
         kwargs["output_gain_learnable"] = True
+    # DC removal: off unless a real-audio triangle config asks for it (the comb has no DC).
+    if settings.get("output_dc", "none") != "none":
+        if kind != "triangle":
+            raise ValueError("output_dc applies to the triangle model.")
+        kwargs["output_dc"] = settings["output_dc"]
     if method == "relaxation":
         initialization = settings.get("relaxation_initialization", "random")
         if initialization not in {"random", "configured"}:
