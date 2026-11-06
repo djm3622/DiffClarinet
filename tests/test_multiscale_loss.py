@@ -1,6 +1,8 @@
+import pytest
 import torch
 
-from model.kps.training import TriangleFitConfig, _loss, multiscale_spectral_loss
+from model.kps.training import (TriangleFitConfig, _loss, _triangle_spectral_loss,
+                                multiscale_spectral_loss)
 
 
 def _decaying_tone(n: int, period: int, decay: float) -> torch.Tensor:
@@ -27,6 +29,23 @@ def test_loss_dispatch_inverts_target_spectrum_exactly():
     assert torch.allclose(via_dispatch, direct, rtol=1e-6)
     via_dispatch.backward()
     assert torch.isfinite(y.grad).all() and y.grad.abs().sum() > 0
+
+
+def test_multiscale_noise_floor_adds_both_losses_at_equal_weight():
+    x = _decaying_tone(8192, 120, 0.9995)
+    y = (0.5 * _decaying_tone(8192, 121, 0.9990)).requires_grad_(True)
+    spectrum = torch.fft.rfft(x)
+    combined = _loss(y, spectrum, "multiscale_noise_floor")
+    assert torch.allclose(combined, _loss(y, spectrum, "multiscale") + _loss(y, spectrum, "noise_floor"))
+    combined.backward()
+    assert torch.isfinite(y.grad).all() and y.grad.abs().sum() > 0
+
+
+def test_multiscale_noise_floor_needs_waveforms():
+    spectrum = torch.fft.rfft(_decaying_tone(1024, 120, 0.999))
+    with pytest.raises(ValueError):
+        _triangle_spectral_loss(spectrum, spectrum, "multiscale_noise_floor")
+    assert TriangleFitConfig(spectrum_normalization="multiscale_noise_floor")
 
 
 def test_config_accepts_multiscale():

@@ -1,8 +1,8 @@
-# Real-audio single-note blind run, arm t2_energy_velocity: triangle model on all 32 n = 1 NSynth guitar
-# notes, seed 0, REINFORCE + local random search; energy-weighted loss, first-difference output.
+# Real-audio single-note blind run, arm t6_multiscale_noise_floor_dc_block: triangle model on all 32 n = 1 NSynth guitar
+# notes, seed 0, REINFORCE + local random search; multi-scale + noise_floor loss, DC block.
 # L in [90, 210] at 22025 Hz: MIDI 57 (220 Hz, period 100.1) and flat MIDI 45 notes both sit
 # inside the range, which [100, 200] did not guarantee.
-output_dir: output/real_audio_single_note/t2_energy_velocity
+output_dir: output/real_audio_single_note/t6_multiscale_noise_floor_dc_block
 filter: triangle
 dataset: data/nsynth_guitar
 methods:
@@ -25,7 +25,7 @@ model:
   gain_min: 0.5
   gain_max: 1.0
   output_gain: learned
-  output_dc: velocity
+  output_dc: dc_block
 fit:
   epochs: 20000
   refine_epochs: 20000
@@ -33,7 +33,7 @@ fit:
   reinforce_samples: 8
   continuous_lr: 0.01
   discrete_lr: 0.003
-  spectrum_normalization: energy
+  spectrum_normalization: multiscale_noise_floor
   initial_uniform_prior_weight: 0.05
   final_uniform_prior_weight: 0.001
   prior_anneal_epochs: 20000
