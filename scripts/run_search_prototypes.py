@@ -72,6 +72,9 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     models = benchmark.make_models(config, row["filter"], base, row["source_count"])
     stems, truth, rate = benchmark.load_case(row["filter"], paths, config)
     target, cfg = stems.sum(0), settings(config, scale)
+    noise = None
+    if "target_noise" in config:  # same per-case realization as run_delay_benchmark
+        target, noise = benchmark.add_target_noise(target, row, config)
     position = "dp" if row["filter"] == "comb" else "A"
     progress = output / "progress.jsonl"
     progress.write_text("")
@@ -115,7 +118,8 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     true_pairs = [(int(v["L"]), int(v["position"])) for v in truth]
     counters = next((row for row in history if "proposals_drawn" in row), {})
     summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
-               "source_syntheses": calls, "found": found, "true": true_pairs,
+               "source_syntheses": calls, "found": found, "true": true_pairs, "target_noise": noise,
+               "spectrum_normalization": cfg["spectrum_normalization"],
                "set_overlap": sum((Counter(found) & Counter(true_pairs)).values()) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
                * row["source_count"], "history": history,
@@ -135,6 +139,8 @@ def safe_case(*args):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("output/search_prototypes_20261105"))
+    parser.add_argument("--config", default=CONFIG,
+                        help="Benchmark config: cases, budgets, loss and optional target_noise")
     parser.add_argument("--methods", nargs="+", default=list(METHODS))
     parser.add_argument("--counts", type=int, nargs="+", default=[2, 4, 6])
     parser.add_argument("--filters", nargs="+", default=["comb", "triangle"])
@@ -150,7 +156,7 @@ def main() -> None:
     unknown = set(args.methods + args.extra_methods) - set(METHODS + EXTRA_METHODS)
     if unknown:  # safe_case would only print the error and exit 0.
         parser.error(f"unknown methods: {sorted(unknown)}")
-    config = benchmark.read_config(benchmark.ROOT / CONFIG, [])
+    config = benchmark.read_config(benchmark.ROOT / args.config, [])
     plan, inventories = benchmark.make_plan(config)
     jobs = []
     for row in plan:
