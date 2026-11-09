@@ -160,7 +160,9 @@ def main() -> None:
     plan, inventories = benchmark.make_plan(config)
     jobs = []
     for row in plan:
-        if (row["filter"] in args.filters and row["source_count"] in args.counts
+        # One job per case: configs listing several methods repeat each case per method.
+        if (row["method"] == config["methods"][0] and row["filter"] in args.filters
+                and row["source_count"] in args.counts
                 and row["instance"] < args.instances and row["seed"] == args.seed):
             paths = [inventories[row["filter"]][i] for i in json.loads(row["indices"])]
             for method in [*args.methods, *args.extra_methods]:
