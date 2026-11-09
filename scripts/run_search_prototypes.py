@@ -167,7 +167,7 @@ def main() -> None:
             paths = [inventories[row["filter"]][i] for i in json.loads(row["indices"])]
             for method in [*args.methods, *args.extra_methods]:
                 case = {**row, "method": method,
-                        "run_id": row["run_id"].replace("random_search_local", method)}
+                        "run_id": row["run_id"].replace(row["method"], method)}
                 jobs.append((case, config, paths, args.output.resolve(), args.scale))
     jobs.sort(key=lambda job: (args.extra_methods.index(job[0]["method"]) + 1
                                if job[0]["method"] in args.extra_methods else 0,
