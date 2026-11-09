@@ -28,6 +28,11 @@ def _set_a(model, a: float) -> None:
     model.a.copy_(torch.logit(model.a.new_tensor(min(max(a, 1e-4), 1 - 1e-4))))
 
 
+def _set_log_g(model, log_g: float) -> None:
+    if hasattr(model, "log_output_gain"):
+        model.log_output_gain.fill_(log_g)
+
+
 def _wave(model, n: int, pair) -> torch.Tensor:
     return model.time_domain_synth(n, model.L_logits.new_ones(1), *pair)
 
@@ -43,6 +48,8 @@ class Log:
         row = {"calls": calls, "loss": float(loss), "pairs": [list(p) for p in pairs],
                "K": [float(m.scaled_gain().detach()) for m in models],
                "a": [float(m.scaled_allplus().detach()) for m in models]}
+        if all(hasattr(m, "log_output_gain") for m in models):
+            row["g"] = [float(m.output_gain().detach()) for m in models]
         self.rows.append(row)
         if self.path is not None:
             with self.path.open("a") as stream:
@@ -216,18 +223,26 @@ def fit_reinforce_kprofile(models, target, cfg, position, log_path=None):
 
 
 def fit_mcmc_pt(models, target, cfg, log_path=None):
-    """Parallel tempering over (L_i, position_i, K_i, a_i) targeting exp(-loss / T)."""
+    """Parallel tempering over (L_i, position_i, K_i, a_i[, log g_i]) targeting exp(-loss / T).
+
+    With a learned output gain g (as in the real-audio runner), the continuous move also takes
+    a Gaussian step of g_step in log g, and each chain starts with every source scaled so the
+    summed start matches the target's RMS. Without g the search is unchanged.
+    """
     n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
     spectrum = torch.fft.rfft(target[:n])
     grids, valid = _grids(models)
     sources, temperatures = len(models), cfg["temperatures"]
+    learns_g = all(hasattr(model, "log_output_gain") for model in models)
     budget = cfg["epochs"] * cfg["samples"] * sources
     log = Log(log_path, cfg["log_calls"])
     calls = sweep = drawn = noop = accepted = 0
+    keys = ("pairs", "K", "a", "log_g")
 
-    def wave(i, pair, K, a):
+    def wave(i, pair, K, a, log_g):
         _set_K(models[i], K)
         _set_a(models[i], a)
+        _set_log_g(models[i], log_g)
         return _wave(models[i], n, pair)
 
     def score(waves):
@@ -239,17 +254,25 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
             pairs = [_uniform(grids, i) for i in range(sources)]
             K = [cfg["initial_K"]] * sources
             a = [cfg["initial_a"]] * sources
-            waves = [wave(i, pairs[i], K[i], a[i]) for i in range(sources)]
+            log_g = [0.0] * sources
+            waves = [wave(i, pairs[i], K[i], a[i], log_g[i]) for i in range(sources)]
             calls += sources
-            chains.append({"pairs": pairs, "K": K, "a": a, "waves": waves, "loss": score(waves)})
+            if learns_g:  # one shared start scale: the summed start has the target's RMS
+                shift = float(torch.log(target[:n].square().mean().sqrt()
+                                        / sum(waves).square().mean().sqrt().clamp_min(1e-12)))
+                log_g = [shift] * sources
+                waves = [w * math.exp(shift) for w in waves]
+            chains.append({"pairs": pairs, "K": K, "a": a, "log_g": log_g, "waves": waves,
+                           "loss": score(waves)})
         best = min(chains, key=lambda c: c["loss"])
-        best = {key: list(best[key]) for key in ("pairs", "K", "a")} | {"loss": best["loss"]}
+        best = {key: list(best[key]) for key in keys} | {"loss": best["loss"]}
         while calls < budget:
             for chain, T in zip(chains, temperatures):
                 drawn += 1
                 move = float(torch.rand(()))
                 i = int(torch.randint(sources, ()))
                 changed = {}
+                state = lambda s: (chain["pairs"][s], chain["K"][s], chain["a"][s], chain["log_g"][s])
                 if move < cfg["swap_move"] and sources > 1:
                     j = int(torch.randint(sources - 1, ()))
                     j += j >= i
@@ -258,13 +281,13 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                     new_i = (q[0] if kind != 1 else p[0], q[1] if kind != 0 else p[1])
                     new_j = (p[0] if kind != 1 else q[0], p[1] if kind != 0 else q[1])
                     if new_i in valid[i] and new_j in valid[j]:
-                        changed = {i: (new_i, chain["K"][i], chain["a"][i]),
-                                   j: (new_j, chain["K"][j], chain["a"][j])}
+                        changed = {i: (new_i, *state(i)[1:]), j: (new_j, *state(j)[1:])}
                 elif move < cfg["swap_move"] + cfg["continuous_move"]:
                     K = chain["K"][i] + cfg["K_step"] * float(torch.randn(()))
                     a = chain["a"][i] + cfg["a_step"] * float(torch.randn(()))
+                    log_g = chain["log_g"][i] + (cfg["g_step"] * float(torch.randn(())) if learns_g else 0.0)
                     if models[i].gain_min < K < models[i].gain_max and 0 < a < 1:
-                        changed = {i: (chain["pairs"][i], K, a)}
+                        changed = {i: (chain["pairs"][i], K, a, log_g)}
                 else:
                     if float(torch.rand(())) < cfg["local_probability"]:
                         step = torch.randint(-cfg["local_radius"], cfg["local_radius"] + 1, (2,)).tolist()
@@ -272,23 +295,23 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                     else:
                         pair = _uniform(grids, i)
                     if pair in valid[i] and pair != chain["pairs"][i]:
-                        changed = {i: (pair, chain["K"][i], chain["a"][i])}
+                        changed = {i: (pair, *state(i)[1:])}
                 if not changed:
                     noop += 1
                     continue
                 waves = list(chain["waves"])
-                for index, (pair, K, a) in changed.items():
-                    waves[index] = wave(index, pair, K, a)
+                for index, values in changed.items():
+                    waves[index] = wave(index, *values)
                 calls += len(changed)
                 loss = score(waves)
                 if loss <= chain["loss"] or float(torch.rand(())) < math.exp((chain["loss"] - loss) / T):
                     accepted += 1
-                    for index, (pair, K, a) in changed.items():
-                        chain["pairs"][index], chain["K"][index], chain["a"][index] = pair, K, a
+                    for index, values in changed.items():
+                        for key, value in zip(keys, values):
+                            chain[key][index] = value
                     chain["waves"], chain["loss"] = waves, loss
                     if loss < best["loss"]:
-                        best = {"pairs": list(chain["pairs"]), "K": list(chain["K"]),
-                                "a": list(chain["a"]), "loss": loss}
+                        best = {key: list(chain[key]) for key in keys} | {"loss": loss}
             sweep += 1
             if sweep % cfg["exchange_every"] == 0:
                 for c in range(len(chains) - 1):
@@ -300,6 +323,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
         for i in range(sources):
             _set_K(models[i], best["K"][i])
             _set_a(models[i], best["a"][i])
+            _set_log_g(models[i], best["log_g"][i])
     log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_noop": noop,
                      "proposals_accepted": accepted})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)

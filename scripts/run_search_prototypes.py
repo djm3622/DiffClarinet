@@ -13,6 +13,7 @@ import torch
 
 from diagnostics import search_prototypes as prototypes
 from diagnostics.random_search import fit_random_search
+from model.kps.training import _loss, _synth
 from scripts import run_delay_benchmark as benchmark
 from scripts.eval.source_baselines import loop_pitch, multipitch_klapuri
 
@@ -20,10 +21,12 @@ CONFIG = "configs/delay_benchmark_random_search_local_full.yaml"
 METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", "mcmc_pt",
            "em_backfit", "em_backfit_klapuri", "cem_joint", "mp_init", "gibbs_pt", "mcmc_grad",
            "mcmc_grad_noLgrad")
-EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot")
+# reinforce is the paper's REINFORCE (fit_filtered), not a prototype.
+EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", "reinforce")
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
-                swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
+                swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, g_step=0.05,
+                exchange_every=20,
                 em_K_coarse=[0.6, 0.8, 0.95], em_K_grid=[0.55, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98],
                 em_top=16, em_refine_steps=20, mp_K=[0.6, 0.8, 0.95], mp_a=[0.25, 0.75],
                 cem_samples=64, cem_elite=0.1, cem_alpha=0.3, cem_floor=1e-3,
@@ -69,14 +72,23 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     np.random.seed(seed)
     torch.manual_seed(seed)
     base = "reinforce" if method.startswith("reinforce") else "random_search_local"
-    models = benchmark.make_models(config, row["filter"], base, row["source_count"])
+    models = benchmark.make_models(config, row["filter"], base, row["fitted_count"])
     stems, truth, rate = benchmark.load_case(row["filter"], paths, config)
     target, cfg = stems.sum(0), settings(config, scale)
     position = "dp" if row["filter"] == "comb" else "A"
     progress = output / "progress.jsonl"
     progress.write_text("")
     start = time.perf_counter()
-    if method == "rs_swap":
+    if method == "reinforce":
+        fit = {**config["fit"], **{key: max(int(config["fit"][key] * scale), 2)
+                                   for key in ("epochs", "refine_epochs", "prior_anneal_epochs")}}
+        result = benchmark.fit_filtered(models, target, benchmark.filtered_config(
+            {**config, "fit": fit}, method), position)  # indices only label progress output
+        history = [{"step": step, "loss": loss, "pairs": pairs} for step, (loss, pairs)
+                   in enumerate(zip(result.losses, result.trajectory))
+                   if step % fit["print_frequency"] == 0 or step == len(result.losses) - 1]
+        calls = (fit["epochs"] * fit["reinforce_samples"] + fit["refine_epochs"]) * len(models)
+    elif method == "rs_swap":
         history, calls = fit_random_search(models, target, cfg, progress)
     elif method == "rs_cached":
         history, calls = prototypes.fit_rs_cached(models, target, cfg, progress)
@@ -113,12 +125,25 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
                                           models, truth, paths, output, rate)
     found = [model.selected_delays() for model in models]
     true_pairs = [(int(v["L"]), int(v["position"])) for v in truth]
+    with torch.no_grad():
+        final_loss = float(_loss(_synth(models, cfg["n_fft"], found),
+                                 torch.fft.rfft(target[:cfg["n_fft"]]), cfg["spectrum_normalization"]))
+    estimates = [{"L": L, "position": position, "K": float(model.scaled_gain().detach()),
+                  "a": float(model.scaled_allplus().detach()),
+                  "g": float(torch.as_tensor(model.output_gain()).detach())
+                  if hasattr(model, "output_gain") else 1.0}
+                 for model, (L, position) in zip(models, found)]
+    # Set match of the n loudest fitted sources (multiset, as in the paper's set match).
+    loudest = sorted(estimates, key=lambda e: -abs(e["g"]))[:len(true_pairs)]
     counters = next((row for row in history if "proposals_drawn" in row), {})
     summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
                "source_syntheses": calls, "found": found, "true": true_pairs,
                "set_overlap": sum((Counter(found) & Counter(true_pairs)).values()) / len(true_pairs),
+               "estimates": estimates, "truth": truth, "final_loss": final_loss,
+               "top_gain_set_match": sum((Counter((e["L"], e["position"]) for e in loudest)
+                                          & Counter(true_pairs)).values()) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
-               * row["source_count"], "history": history,
+               * row["fitted_count"], "history": history,
                **{key: value for key, value in counters.items() if key.startswith("proposals_")}}
     benchmark.write_json(output / "summary.json", summary)
     return summary
@@ -146,11 +171,17 @@ def main() -> None:
     parser.add_argument("--list-jobs", action="store_true", help="Print index and run_id of every fit")
     parser.add_argument("--extra-methods", nargs="*", default=[],
                         help="Appended after --methods, so earlier job indices do not move")
+    parser.add_argument("--fit-offsets", type=int, nargs="+", default=[0],
+                        help="Fit n + offset sources to mixtures of n true sources")
+    parser.add_argument("--free-gain", action="store_true",
+                        help="Learn each source's output gain g (triangle); the targets have g = 1")
     args = parser.parse_args()
     unknown = set(args.methods + args.extra_methods) - set(METHODS + EXTRA_METHODS)
     if unknown:  # safe_case would only print the error and exit 0.
         parser.error(f"unknown methods: {sorted(unknown)}")
     config = benchmark.read_config(benchmark.ROOT / CONFIG, [])
+    if args.free_gain:
+        config["model"]["output_gain"] = "learned"
     plan, inventories = benchmark.make_plan(config)
     jobs = []
     for row in plan:
@@ -158,9 +189,14 @@ def main() -> None:
                 and row["instance"] < args.instances and row["seed"] == args.seed):
             paths = [inventories[row["filter"]][i] for i in json.loads(row["indices"])]
             for method in [*args.methods, *args.extra_methods]:
-                case = {**row, "method": method,
-                        "run_id": row["run_id"].replace("random_search_local", method)}
-                jobs.append((case, config, paths, args.output.resolve(), args.scale))
+                for offset in args.fit_offsets:
+                    if row["source_count"] + offset < 1:
+                        continue
+                    name = method if offset == 0 else f"{method}_fit{row['source_count'] + offset:02}"
+                    case = {**row, "method": method, "fitted_count": row["source_count"] + offset,
+                            "free_gain": args.free_gain,
+                            "run_id": row["run_id"].replace("random_search_local", name)}
+                    jobs.append((case, config, paths, args.output.resolve(), args.scale))
     jobs.sort(key=lambda job: (args.extra_methods.index(job[0]["method"]) + 1
                                if job[0]["method"] in args.extra_methods else 0,
                                -job[0]["source_count"]))

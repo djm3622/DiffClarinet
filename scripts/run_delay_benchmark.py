@@ -242,6 +242,13 @@ def make_models(config: dict, kind: str, method: str, count: int) -> nn.ModuleLi
         "delay_gain_learnable": True,
         "random_init": method == "reinforce",
     }
+    # Output (loudness) gain: fixed at 1 (MATLAB model) unless the config learns it.
+    if settings.get("output_gain", "fixed") not in {"fixed", "learned"}:
+        raise ValueError("output_gain must be fixed or learned")
+    if settings.get("output_gain") == "learned":
+        if kind != "triangle" or method == "relaxation":
+            raise ValueError("A learned output gain is implemented for the triangle integer-pair model.")
+        kwargs["output_gain_learnable"] = True
     if method == "relaxation":
         initialization = settings.get("relaxation_initialization", "random")
         if initialization not in {"random", "configured"}:
