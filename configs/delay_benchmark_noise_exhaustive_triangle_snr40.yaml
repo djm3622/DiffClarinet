@@ -1,0 +1,48 @@
+# Noise check at 40 dB: exhaustive (L, position) search over the K grid (a = 0.5) on
+# noisy n=1 triangle targets, all 32 k05 cases, seed 0. Same target_noise definition and per-case
+# realization as delay_benchmark_noise_snr*.yaml (instances 0-4 see identical noise).
+# Separates a loss-landscape failure from an optimizer failure under noise.
+output_dir: output/delay_benchmark_noise_exhaustive_triangle_snr40
+datasets:
+  triangle: data/vary_all_triangle
+methods:
+- exhaustive_K_grid
+source_counts:
+- 1
+seeds:
+- 0
+instances: 32
+selection_seed: 1729
+threads: 1
+model:
+  L_min: 100
+  L_max: 200
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: none
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 500
+  show_progress: false
+workers: 1
+exhaustive_K_grid: [0.55, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98]
+target_noise:
+  snr_db: 40
