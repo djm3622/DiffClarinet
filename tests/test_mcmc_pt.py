@@ -61,3 +61,17 @@ def test_configs_read_and_plan_mcmc_rows():
         assert config["model"]["output_dc"] == "dc_block"
         cfg = real.mcmc_config(config)
         assert cfg["epochs"] * cfg["samples"] == 20000 * 8 and cfg["refine_epochs"] == 20000
+        assert cfg["temperature_scale"] == 0.21
+
+
+def test_temperature_scale_defaults_to_one_and_cools_the_ladder():
+    torch.manual_seed(2)
+    target = _synth(nn.ModuleList([source(gain=False)]), 256, [(7, 2)]).detach()
+    accepted = []
+    for extra in ({}, {"temperature_scale": 1.0}, {"temperature_scale": 1e-6}):
+        torch.manual_seed(5)
+        models = nn.ModuleList([source(gain=False)])
+        history, _ = fit_mcmc_pt(models, target, settings(epochs=40, refine_epochs=1, **extra))
+        accepted.append(history[-2]["proposals_accepted"])
+    assert accepted[0] == accepted[1]
+    assert accepted[2] < accepted[0]

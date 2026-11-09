@@ -56,8 +56,8 @@ def read_config(path: Path, overrides: list[str]) -> dict:
                 "threads", "model", "fit", "sampled_gumbel", "random_search", "classical"}
     if "mcmc_pt" in config["methods"]:
         expected.add("mcmc_pt")
-        if set(config.get("mcmc_pt", {})) != MCMC_KEYS:
-            raise ValueError(f"mcmc_pt needs settings {sorted(MCMC_KEYS)}")
+        if not MCMC_KEYS <= set(config.get("mcmc_pt", {})) <= MCMC_KEYS | {"temperature_scale"}:
+            raise ValueError(f"mcmc_pt needs settings {sorted(MCMC_KEYS)} (temperature_scale optional)")
     if "filter" in config:
         expected.add("filter")
         if config["filter"] not in {"comb", "triangle"}:

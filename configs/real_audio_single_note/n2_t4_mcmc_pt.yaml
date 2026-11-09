@@ -65,3 +65,6 @@ mcmc_pt:
   a_step: 0.03
   g_step: 0.05
   exchange_every: 20
+  # Ladder x 0.21: median |delta loss| of proposals under this loss is 0.15-0.29 (median 0.21)
+  # of the plain log-spectral loss's on i0, i6, i7 and n = 2 i0 (10% budget, local check).
+  temperature_scale: 0.21

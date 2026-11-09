@@ -7,7 +7,7 @@ exp(-(loss' - loss) / T); neighbouring chains exchange states every exchange_eve
 It spends epochs * samples * n source syntheses, the REINFORCE/random-search budget, then
 refines the continuous parameters of the best state with Adam for refine_epochs steps.
 
-Real audio adds the learned output gain g: when a source has one, the continuous move also
+An optional temperature_scale multiplies the ladder. Real audio adds the learned output gain g: when a source has one, the continuous move also
 takes a Gaussian step of g_step in log g, and each chain starts with every source scaled
 so the summed start matches the target's RMS. Without g the search is the prototype's.
 """
@@ -73,7 +73,10 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     spectrum = torch.fft.rfft(target[:n])
     grids = [model.all_pairs() for model in models]
     valid = [set(grid) for grid in grids]
-    sources, temperatures = len(models), cfg["temperatures"]
+    # temperature_scale (default 1) rescales the ladder to the loss: the prototype ladder was
+    # tuned on the plain log-spectral loss, whose proposal |delta loss| is several times larger.
+    sources = len(models)
+    temperatures = [T * cfg.get("temperature_scale", 1.0) for T in cfg["temperatures"]]
     learns_g = all(hasattr(model, "log_output_gain") for model in models)
     budget = cfg["epochs"] * cfg["samples"] * sources
     log = Log(log_path, cfg["log_calls"])
