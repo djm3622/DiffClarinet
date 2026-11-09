@@ -33,9 +33,10 @@ SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gr
                 grad_window=8, grad_alpha=4.0, data_sharpness=20.0, data_floor=0.05)
 
 
-def settings(config: dict, scale: float = 1.0) -> dict:
+def settings(config: dict, scale: float = 1.0, temperature_scale: float = 1.0) -> dict:
     fit, search = config["fit"], config["random_search"]
-    return {**SETTINGS, **search, "variant": "local", "n_fft": fit["n_fft"],
+    return {**SETTINGS, **search,
+            "temperatures": [T * temperature_scale for T in SETTINGS["temperatures"]], "variant": "local", "n_fft": fit["n_fft"],
             "epochs": max(int(fit["epochs"] * scale), 2),
             "refine_epochs": max(int(fit["refine_epochs"] * scale), 2),
             "continuous_lr": fit["continuous_lr"], "discrete_lr": fit["discrete_lr"],
@@ -58,7 +59,8 @@ def klapuri_delays(target: torch.Tensor, rate: int, config: dict, count: int) ->
     return [min(delays, key=lambda L: abs(loop_pitch(L, 0.5, rate) - pitch)) for pitch in pitches]
 
 
-def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: float) -> dict:
+def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: float,
+             temperature_scale: float = 1.0) -> dict:
     torch.set_num_threads(1)
     method, seed = row["method"], row["seed"]
     output = root / row["run_id"]
@@ -71,7 +73,7 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     base = "reinforce" if method.startswith("reinforce") else "random_search_local"
     models = benchmark.make_models(config, row["filter"], base, row["source_count"])
     stems, truth, rate = benchmark.load_case(row["filter"], paths, config)
-    target, cfg = stems.sum(0), settings(config, scale)
+    target, cfg = stems.sum(0), settings(config, scale, temperature_scale)
     noise = None
     if "target_noise" in config:  # same per-case realization as run_delay_benchmark
         target, noise = benchmark.add_target_noise(target, row, config)
@@ -120,6 +122,7 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     summary = {**row, "status": "completed", "metrics": metrics, "matched_sources": matches, "fit_seconds": seconds,
                "source_syntheses": calls, "found": found, "true": true_pairs, "target_noise": noise,
                "spectrum_normalization": cfg["spectrum_normalization"],
+               "temperature_scale": temperature_scale,
                "set_overlap": sum((Counter(found) & Counter(true_pairs)).values()) / len(true_pairs),
                "budget_source_syntheses": (cfg["epochs"] * cfg["samples"] + cfg["refine_epochs"])
                * row["source_count"], "history": history,
@@ -148,6 +151,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--scale", type=float, default=1.0, help="Budget multiplier, for smoke tests")
+    parser.add_argument("--temperature-scale", type=float, default=1.0,
+                        help="Multiplies the mcmc_pt temperature ladder (1 = as tuned on the old loss)")
     parser.add_argument("--job-index", type=int, help="Run this one fit of the job list (Slurm arrays)")
     parser.add_argument("--list-jobs", action="store_true", help="Print index and run_id of every fit")
     parser.add_argument("--extra-methods", nargs="*", default=[],
@@ -168,7 +173,8 @@ def main() -> None:
             for method in [*args.methods, *args.extra_methods]:
                 case = {**row, "method": method,
                         "run_id": row["run_id"].replace(row["method"], method)}
-                jobs.append((case, config, paths, args.output.resolve(), args.scale))
+                jobs.append((case, config, paths, args.output.resolve(), args.scale,
+                             args.temperature_scale))
     jobs.sort(key=lambda job: (args.extra_methods.index(job[0]["method"]) + 1
                                if job[0]["method"] in args.extra_methods else 0,
                                -job[0]["source_count"]))
