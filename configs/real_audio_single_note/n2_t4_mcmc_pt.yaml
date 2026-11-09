@@ -1,0 +1,67 @@
+# Real-audio mcmc_pt arm n2_t4_mcmc_pt: triangle model, multi-scale loss, DC block, learned
+# output gain, on the first 32 two-note mixtures of the single-note runs, seed 0.
+# Same model, loss, L in [90, 210] and synthesis budget as t4_multiscale_dc_block.yaml.
+output_dir: output/real_audio_single_note/n2_t4_mcmc_pt
+filter: triangle
+dataset: data/nsynth_guitar
+methods:
+- mcmc_pt
+source_counts:
+- 2
+seeds:
+- 0
+instances: 32
+threads: 1
+model:
+  L_min: 90
+  L_max: 210
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  output_gain: learned
+  output_dc: dc_block
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: multiscale
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 500
+  show_progress: false
+sampled_gumbel:
+  samples: 8
+  physical_weighting: softmax
+random_search:
+  samples: 8
+  local_radius: 3
+  local_probability: 0.5
+# Same Klapuri settings as configs/pitch_benchmark.yaml.
+classical:
+  frame_size: 8192
+  hop_size: 512
+  bin_cents: 10.0
+  separation_cents: 30.0
+# Parallel-tempering MCMC (diagnostics/mcmc_pt.py): search-prototype settings, plus a log-g
+# step for the learned output gain. Budget and refinement as REINFORCE (fit and random_search).
+mcmc_pt:
+  temperatures: [0.01, 0.03, 0.08, 0.2, 0.5, 1.2]
+  swap_move: 0.1
+  continuous_move: 0.3
+  K_step: 0.02
+  a_step: 0.03
+  g_step: 0.05
+  exchange_every: 20

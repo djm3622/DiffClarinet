@@ -29,11 +29,16 @@ from scipy.optimize import linear_sum_assignment
 import torch
 import yaml
 
+from diagnostics.mcmc_pt import fit_mcmc_pt
 from scripts import run_delay_benchmark as benchmark
 from scripts.eval.source_baselines import (autocorrelation_pitches, loop_pitch,
                                            multipitch_klapuri, pitch_metrics)
 
-METHODS = {"reinforce", "gumbel_sampled", "random_search_local"}
+METHODS = {"reinforce", "gumbel_sampled", "random_search_local", "mcmc_pt"}
+# mcmc_pt shares random search's model setup (fixed initial K and a) and fit settings.
+SETUP = {"mcmc_pt": "random_search_local"}
+MCMC_KEYS = {"temperatures", "swap_move", "continuous_move", "K_step", "a_step", "g_step",
+             "exchange_every"}
 THRESHOLDS = (25, 50)
 
 
@@ -49,6 +54,10 @@ def read_config(path: Path, overrides: list[str]) -> dict:
         node[keys[-1]] = yaml.safe_load(value)
     expected = {"output_dir", "dataset", "methods", "source_counts", "seeds", "instances",
                 "threads", "model", "fit", "sampled_gumbel", "random_search", "classical"}
+    if "mcmc_pt" in config["methods"]:
+        expected.add("mcmc_pt")
+        if set(config.get("mcmc_pt", {})) != MCMC_KEYS:
+            raise ValueError(f"mcmc_pt needs settings {sorted(MCMC_KEYS)}")
     if "filter" in config:
         expected.add("filter")
         if config["filter"] not in {"comb", "triangle"}:
@@ -58,8 +67,8 @@ def read_config(path: Path, overrides: list[str]) -> dict:
     if not config["methods"] or not set(config["methods"]) <= METHODS:
         raise ValueError(f"Methods must be among {sorted(METHODS)}.")
     for method in config["methods"]:
-        benchmark.filtered_config(config, method)
-        benchmark.make_models(config, kind(config), method, 1)
+        benchmark.filtered_config(config, SETUP.get(method, method))
+        benchmark.make_models(config, kind(config), SETUP.get(method, method), 1)
     return config
 
 
@@ -96,12 +105,24 @@ def load_case(config: dict, notes: list[int]):
     return torch.stack(stems), [table[i] for i in notes], rates.pop()
 
 
+def mcmc_config(config: dict) -> dict:
+    """Same search and refinement budget as REINFORCE/random search (epochs * samples * n)."""
+    fit, search = config["fit"], config["random_search"]
+    return {**config["mcmc_pt"], "epochs": fit["epochs"], "samples": search["samples"],
+            "refine_epochs": fit["refine_epochs"], "n_fft": fit["n_fft"],
+            "continuous_lr": fit["continuous_lr"],
+            "spectrum_normalization": fit["spectrum_normalization"],
+            "local_radius": search["local_radius"], "local_probability": search["local_probability"],
+            "initial_K": config["model"]["initial_K"], "initial_a": config["model"]["initial_a"],
+            "log_calls": 2000}
+
+
 def fit_case(row: dict, config: dict, output: Path) -> dict:
     random.seed(row["seed"])
     np.random.seed(row["seed"])
     torch.manual_seed(row["seed"])
     method, count = row["method"], row["source_count"]
-    models = benchmark.make_models(config, kind(config), method, count)
+    models = benchmark.make_models(config, kind(config), SETUP.get(method, method), count)
     position = "dp" if kind(config) == "comb" else "A"
     stems, notes, rate = load_case(config, row["notes"])
     target = stems.sum(0)
@@ -109,6 +130,9 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
     if method == "gumbel_sampled":
         history, syntheses = benchmark.fit_sampled(
             models, target, benchmark.sampled_config(config), position, output / "progress.jsonl")
+    elif method == "mcmc_pt":
+        history, syntheses = fit_mcmc_pt(models, target, mcmc_config(config),
+                                         output / "progress.jsonl")
     elif method in benchmark.RANDOM_SEARCH:
         history, syntheses = benchmark.fit_random_search(
             models, target, benchmark.random_search_config(config, method),
@@ -160,8 +184,9 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
     summary = {**row, "status": "completed", "metrics": metrics, "estimates": estimates,
                "matched_sources": matched, "fit_seconds": fit_seconds,
                "training_source_syntheses": syntheses, "sample_rate": rate,
-               "fit_config": {**benchmark.asdict(benchmark.filtered_config(config, method)),
-                              "method": method},
+               "fit_config": {**benchmark.asdict(benchmark.filtered_config(
+                                  config, SETUP.get(method, method))), "method": method,
+                              **({"mcmc_pt": mcmc_config(config)} if method == "mcmc_pt" else {})},
                "fit_domain": "finite_causal_first_n_fft", "evaluation_domain": "full_causal_audio",
                "pitch_reference": "nominal NSynth MIDI f0 (A4 = 440 Hz)",
                "filter": kind(config),
