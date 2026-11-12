@@ -25,7 +25,9 @@ MCMC_ABLATIONS = {"mcmc_pt_notemper": {"pt_tempering": False},
                   "mcmc_pt_noswap": {"swap_move": 0.0},
                   "mcmc_pt_onestart": {"pt_one_start": True},
                   "mcmc_pt_adamka": {"pt_adam_ka": True, "continuous_move": 0.0}}
-EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", "coord_sweep", *MCMC_ABLATIONS)
+# Coordinate-wise exhaustive sweep, with 1 or 100 Adam steps on K/a after each source visit.
+SWEEPS = {"coord_sweep": {"ka_steps_per_visit": 1}, "coord_sweep_ka100": {"ka_steps_per_visit": 100}}
+EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS)
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
                 swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
@@ -111,8 +113,8 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
     elif method == "mcmc_pt" or method in MCMC_ABLATIONS:
         history, calls = prototypes.fit_mcmc_pt(models, target, {**cfg, **MCMC_ABLATIONS.get(method, {})},
                                                 progress)
-    elif method == "coord_sweep":
-        history, calls = prototypes.fit_coord_sweep(models, target, cfg, progress)
+    elif method in SWEEPS:
+        history, calls = prototypes.fit_coord_sweep(models, target, {**cfg, **SWEEPS[method]}, progress)
     else:
         raise ValueError(f"Unknown search prototype: {method}")
     seconds = time.perf_counter() - start

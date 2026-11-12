@@ -916,8 +916,10 @@ def fit_coord_sweep(models: nn.ModuleList, target, cfg, log_path=None):
     Sources are visited in turn with the others held fixed and cached, one charged synthesis per
     candidate. Each visit is shaped like a fit_rs_cached update: the incumbent is re-rendered with
     gradients (cfg["gradient_cost"] per source), the best candidate replaces the source's pair if it
-    lowers the loss, and one Adam step on K/a follows. Visits continue until the matched budget is
-    spent (the last may be partial), then the usual K/a refinement. Same start as fit_rs_cached.
+    lowers the loss, and cfg["ka_steps_per_visit"] Adam steps on K/a follow (default 1); each step
+    after the first re-renders the incumbent with gradients at the same charge. Visits continue
+    until the matched budget is spent (the last may be partial), then the usual K/a refinement.
+    Same start as fit_rs_cached.
     """
     n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
     spectrum = torch.fft.rfft(target[:n])
@@ -927,7 +929,7 @@ def fit_coord_sweep(models: nn.ModuleList, target, cfg, log_path=None):
     incumbent = [_uniform(grids, i) for i in range(sources)]
     optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"])
     log = Log(log_path, cfg["log_calls"])
-    calls = visits = complete = drawn = accepted = 0
+    calls = visits = complete = drawn = accepted = ka_steps = 0
     while calls < budget:
         i = visits % sources
         optimizer.zero_grad()
@@ -956,10 +958,20 @@ def fit_coord_sweep(models: nn.ModuleList, target, cfg, log_path=None):
         measured = _loss(sum(waves), spectrum, norm)
         measured.backward()
         _checked_filtered_step(optimizer, models, "coord_sweep", visits)
+        ka_steps += 1
+        for _ in range(cfg.get("ka_steps_per_visit", 1) - 1):
+            if calls >= budget:
+                break
+            optimizer.zero_grad()
+            measured = _loss(sum(_wave(m, n, p) for m, p in zip(models, incumbent)), spectrum, norm)
+            calls += cfg["gradient_cost"] * sources
+            measured.backward()
+            _checked_filtered_step(optimizer, models, "coord_sweep", visits)
+            ka_steps += 1
         visits += 1
         complete += finished
         log(calls, measured.detach(), incumbent, models)
     log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_accepted": accepted,
-                     "source_visits": visits, "complete_visits": complete,
+                     "source_visits": visits, "complete_visits": complete, "ka_steps": ka_steps,
                      "full_sweeps": complete // sources, "pairs_per_source": [len(g) for g in grids]})
     return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)

@@ -144,6 +144,19 @@ class PrototypeTests(unittest.TestCase):
                          row["calls"])
         self.assertEqual(sorted(tuple(x) for x in next(r for r in reversed(history) if "pairs" in r)["pairs"]),
                          truth)
+        self.assertEqual(row["ka_steps"], row["source_visits"])
+
+    def test_coord_sweep_charges_extra_ka_steps(self) -> None:
+        torch.manual_seed(10)
+        models = nn.ModuleList(make_source("dp") for _ in range(2))
+        target = _synth(models, 32, [(5, 2), (6, 3)]).detach()
+        size = len(models[0].all_pairs())
+        settings = cfg(epochs=size, samples=4, refine_epochs=1, ka_steps_per_visit=5)
+        history, _ = p.fit_coord_sweep(models, target, settings)
+        row = next(r for r in history if "source_visits" in r)
+        self.assertLessEqual(row["ka_steps"], 5 * row["source_visits"])
+        self.assertEqual(row["proposals_drawn"] + 2 * 3 * row["ka_steps"] + row["proposals_accepted"],
+                         row["calls"])
 
     def test_runner_rejects_unknown_methods(self) -> None:
         with mock.patch("sys.argv", ["run", "--methods", "random_search_local", "--list-jobs"]):
