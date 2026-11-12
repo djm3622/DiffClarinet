@@ -75,3 +75,23 @@ def test_temperature_scale_defaults_to_one_and_cools_the_ladder():
         accepted.append(history[-2]["proposals_accepted"])
     assert accepted[0] == accepted[1]
     assert accepted[2] < accepted[0]
+
+
+def test_t7d_configs_use_the_sqrt_loss_and_their_ladder():
+    for name, count in (("n1_t7d_mcmc_pt", 1), ("n2_t7d_mcmc_pt", 2)):
+        config = real.read_config(ROOT / "configs/real_audio_single_note" / f"{name}.yaml", [])
+        assert config["fit"]["spectrum_normalization"] == "noise_floor_sqrt"
+        assert config["model"]["output_dc"] == "dc_block" and config["model"]["output_gain"] == "learned"
+        assert config["methods"] == ["mcmc_pt"] and config["source_counts"] == [count]
+        cfg = real.mcmc_config(config)
+        assert cfg["temperature_scale"] == 0.02 and cfg["epochs"] * cfg["samples"] == 20000 * 8
+
+
+def test_mcmc_pt_runs_with_the_sqrt_loss():
+    torch.manual_seed(4)
+    target = _synth(nn.ModuleList([source(gain=False)]), 256, [(6, 3)]).detach()
+    target = 0.05 * target + 1e-4 * torch.randn(256)
+    models = nn.ModuleList([source()])
+    history, calls = fit_mcmc_pt(models, target, settings(
+        epochs=30, refine_epochs=10, spectrum_normalization="noise_floor_sqrt", temperature_scale=0.02))
+    assert calls >= 30 * 4 + 10 and torch.isfinite(torch.tensor(history[-1]["loss"]))
