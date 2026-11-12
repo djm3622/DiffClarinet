@@ -10,7 +10,7 @@ from torch import nn
 from diagnostics import search_prototypes as p
 from diagnostics.random_search import fit_random_search, propose
 from model.kps.training import _synth
-from scripts.run_search_prototypes import SETTINGS, main
+from scripts.run_search_prototypes import MCMC_ABLATIONS, SETTINGS, main
 from tests.test_filtered_fitting import make_source
 
 
@@ -101,6 +101,49 @@ class PrototypeTests(unittest.TestCase):
         history, _ = p.fit_reinforce_elitist(models, target, settings, "dp")
         row = next(r for r in history if "proposals_drawn" in r)
         self.assertEqual(row["proposals_drawn"], settings["epochs"] * (settings["samples"] - 2))
+
+    def test_mcmc_pt_ablations_respect_the_budget(self) -> None:
+        models = nn.ModuleList(make_source("A") for _ in range(2))
+        target = _synth(models, 32, [(5, 2), (6, 3)]).detach()
+        settings = cfg(epochs=20, refine_epochs=1)
+        for name, switches in MCMC_ABLATIONS.items():
+            with self.subTest(name=name):
+                torch.manual_seed(7)
+                history, calls = p.fit_mcmc_pt(models, target, {**settings, **switches})
+                row = next(r for r in history if "proposals_drawn" in r)
+                budget = settings["epochs"] * settings["samples"] * 2
+                self.assertLessEqual(row["calls"], budget + 3 * 2 + 2 + 2)
+                self.assertEqual(calls, row["calls"] + settings["refine_epochs"] * 2)
+                if name == "mcmc_pt_notemper":
+                    self.assertEqual(row["exchanges_accepted"], 0)
+                if name == "mcmc_pt_adamka":
+                    self.assertEqual(row["adam_steps"], row["sweeps"])
+                else:
+                    self.assertEqual(row["adam_steps"], 0)
+
+    def test_one_start_copies_one_draw(self) -> None:
+        grids = [make_source("dp").all_pairs() for _ in range(3)]
+        torch.manual_seed(8)
+        starts = p._chain_starts(grids, 6, True)
+        self.assertTrue(all(s == starts[0] for s in starts))
+        torch.manual_seed(8)
+        self.assertGreater(len({tuple(s) for s in p._chain_starts(grids, 6, False)}), 1)
+
+    def test_coord_sweep_scores_every_pair_and_recovers_an_easy_mixture(self) -> None:
+        torch.manual_seed(9)
+        models = nn.ModuleList(make_source("dp") for _ in range(2))
+        truth = [(5, 2), (6, 3)]
+        target = _synth(models, 32, truth).detach()
+        size = len(models[0].all_pairs())
+        settings = cfg(epochs=size, samples=4, refine_epochs=1)
+        history, _ = p.fit_coord_sweep(models, target, settings)
+        row = next(r for r in history if "source_visits" in r)
+        self.assertEqual(row["pairs_per_source"], [size, size])
+        self.assertGreaterEqual(row["full_sweeps"], 1)
+        self.assertEqual(row["proposals_drawn"] + 2 * 3 * row["source_visits"] + row["proposals_accepted"],
+                         row["calls"])
+        self.assertEqual(sorted(tuple(x) for x in next(r for r in reversed(history) if "pairs" in r)["pairs"]),
+                         truth)
 
     def test_runner_rejects_unknown_methods(self) -> None:
         with mock.patch("sys.argv", ["run", "--methods", "random_search_local", "--list-jobs"]):

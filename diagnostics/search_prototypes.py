@@ -215,15 +215,33 @@ def fit_reinforce_kprofile(models, target, cfg, position, log_path=None):
     return log.rows, _refine(models, pairs, spectrum, cfg, log, calls)
 
 
+def _chain_starts(grids, chains: int, one_start: bool):
+    """Uniform starting pairs per chain; one_start copies a single draw to every chain."""
+    if one_start:
+        pairs = [_uniform(grids, i) for i in range(len(grids))]
+        return [list(pairs) for _ in range(chains)]
+    return [[_uniform(grids, i) for i in range(len(grids))] for _ in range(chains)]
+
+
 def fit_mcmc_pt(models, target, cfg, log_path=None):
-    """Parallel tempering over (L_i, position_i, K_i, a_i) targeting exp(-loss / T)."""
+    """Parallel tempering over (L_i, position_i, K_i, a_i) targeting exp(-loss / T).
+
+    Ablation switches (all off by default): pt_tempering=False runs every chain at the coldest
+    temperature with no exchanges; pt_one_start starts all chains from one draw; pt_adam_ka
+    takes one Adam step on the coldest chain's K/a per sweep, charged as in fit_rs_cached
+    (gradient_cost per source) plus one synthesis per source to re-render that chain's cache.
+    """
     n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
     spectrum = torch.fft.rfft(target[:n])
     grids, valid = _grids(models)
     sources, temperatures = len(models), cfg["temperatures"]
+    tempering, adam = cfg.get("pt_tempering", True), cfg.get("pt_adam_ka", False)
+    if not tempering:
+        temperatures = [min(temperatures)] * len(temperatures)
     budget = cfg["epochs"] * cfg["samples"] * sources
     log = Log(log_path, cfg["log_calls"])
-    calls = sweep = drawn = noop = accepted = 0
+    calls = sweep = drawn = noop = accepted = exchanges = 0
+    optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"]) if adam else None
 
     def wave(i, pair, K, a):
         _set_K(models[i], K)
@@ -233,10 +251,25 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     def score(waves):
         return float(_loss(sum(waves), spectrum, norm))
 
+    def adam_step(chain):
+        nonlocal calls
+        for i in range(sources):
+            _set_K(models[i], chain["K"][i])
+            _set_a(models[i], chain["a"][i])
+        with torch.enable_grad():
+            optimizer.zero_grad()
+            _loss(sum(_wave(m, n, p) for m, p in zip(models, chain["pairs"])), spectrum, norm).backward()
+            _checked_filtered_step(optimizer, models, "mcmc_pt_adamka", sweep)
+        calls += cfg["gradient_cost"] * sources
+        chain["K"] = [float(m.scaled_gain()) for m in models]
+        chain["a"] = [float(m.scaled_allplus()) for m in models]
+        chain["waves"] = [wave(i, chain["pairs"][i], chain["K"][i], chain["a"][i]) for i in range(sources)]
+        calls += sources
+        chain["loss"] = score(chain["waves"])
+
     with torch.no_grad():
         chains = []
-        for _ in temperatures:
-            pairs = [_uniform(grids, i) for i in range(sources)]
+        for pairs in _chain_starts(grids, len(temperatures), cfg.get("pt_one_start", False)):
             K = [cfg["initial_K"]] * sources
             a = [cfg["initial_a"]] * sources
             waves = [wave(i, pairs[i], K[i], a[i]) for i in range(sources)]
@@ -289,19 +322,27 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                     if loss < best["loss"]:
                         best = {"pairs": list(chain["pairs"]), "K": list(chain["K"]),
                                 "a": list(chain["a"]), "loss": loss}
+            if adam:
+                # chains[0] always holds the coldest temperature; exchanges move states, not slots.
+                adam_step(chains[0])
+                if chains[0]["loss"] < best["loss"]:
+                    best = {key: list(chains[0][key]) for key in ("pairs", "K", "a")} | {
+                        "loss": chains[0]["loss"]}
             sweep += 1
-            if sweep % cfg["exchange_every"] == 0:
+            if tempering and sweep % cfg["exchange_every"] == 0:
                 for c in range(len(chains) - 1):
                     delta = (1 / temperatures[c] - 1 / temperatures[c + 1]) * (
                         chains[c]["loss"] - chains[c + 1]["loss"])
                     if delta >= 0 or float(torch.rand(())) < math.exp(delta):
                         chains[c], chains[c + 1] = chains[c + 1], chains[c]
+                        exchanges += 1
             log(calls, best["loss"], best["pairs"], models)
         for i in range(sources):
             _set_K(models[i], best["K"][i])
             _set_a(models[i], best["a"][i])
     log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_noop": noop,
-                     "proposals_accepted": accepted})
+                     "proposals_accepted": accepted, "sweeps": sweep, "exchanges_accepted": exchanges,
+                     "adam_steps": sweep if adam else 0})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
 
 
@@ -868,3 +909,57 @@ def fit_rs_cached(models: nn.ModuleList, target, cfg, log_path=None):
                      "proposals_accepted": accepted})
     return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
 
+
+def fit_coord_sweep(models: nn.ModuleList, target, cfg, log_path=None):
+    """Coordinate-wise exhaustive search: each update scores every valid pair of one source.
+
+    Sources are visited in turn with the others held fixed and cached, one charged synthesis per
+    candidate. Each visit is shaped like a fit_rs_cached update: the incumbent is re-rendered with
+    gradients (cfg["gradient_cost"] per source), the best candidate replaces the source's pair if it
+    lowers the loss, and one Adam step on K/a follows. Visits continue until the matched budget is
+    spent (the last may be partial), then the usual K/a refinement. Same start as fit_rs_cached.
+    """
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, valid = _grids(models)
+    sources = len(models)
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    incumbent = [_uniform(grids, i) for i in range(sources)]
+    optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"])
+    log = Log(log_path, cfg["log_calls"])
+    calls = visits = complete = drawn = accepted = 0
+    while calls < budget:
+        i = visits % sources
+        optimizer.zero_grad()
+        waves = [_wave(m, n, p) for m, p in zip(models, incumbent)]
+        calls += cfg["gradient_cost"] * sources
+        finished = True
+        with torch.no_grad():
+            rest = sum(w.detach() for k, w in enumerate(waves) if k != i)
+            best_score, best = float(_loss(rest + waves[i].detach(), spectrum, norm)), None
+            for pair in grids[i]:
+                if pair == incumbent[i]:
+                    continue
+                if calls >= budget:
+                    finished = False
+                    break
+                calls += 1
+                drawn += 1
+                score = float(_loss(rest + _wave(models[i], n, pair), spectrum, norm))
+                if score < best_score:
+                    best_score, best = score, pair
+        if best is not None:
+            accepted += 1
+            incumbent[i] = best
+            waves[i] = _wave(models[i], n, best)
+            calls += 1
+        measured = _loss(sum(waves), spectrum, norm)
+        measured.backward()
+        _checked_filtered_step(optimizer, models, "coord_sweep", visits)
+        visits += 1
+        complete += finished
+        log(calls, measured.detach(), incumbent, models)
+    log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_accepted": accepted,
+                     "source_visits": visits, "complete_visits": complete,
+                     "full_sweeps": complete // sources, "pairs_per_source": [len(g) for g in grids]})
+    return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
