@@ -242,6 +242,11 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     log = Log(log_path, cfg["log_calls"])
     calls = sweep = drawn = noop = accepted = exchanges = 0
     optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"]) if adam else None
+    # Diagnostics only (no extra random draws): per-temperature proposals, acceptances and
+    # |loss change| of evaluated proposals, and per-adjacent-pair exchange attempts/accepts.
+    slot_tried, slot_accepted = [0] * len(temperatures), [0] * len(temperatures)
+    slot_delta = [0.0] * len(temperatures)
+    pair_tried, pair_accepted = [0] * (len(temperatures) - 1), [0] * (len(temperatures) - 1)
 
     def wave(i, pair, K, a):
         _set_K(models[i], K)
@@ -278,7 +283,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
         best = min(chains, key=lambda c: c["loss"])
         best = {key: list(best[key]) for key in ("pairs", "K", "a")} | {"loss": best["loss"]}
         while calls < budget:
-            for chain, T in zip(chains, temperatures):
+            for slot, (chain, T) in enumerate(zip(chains, temperatures)):
                 drawn += 1
                 move = float(torch.rand(()))
                 i = int(torch.randint(sources, ()))
@@ -314,8 +319,11 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                     waves[index] = wave(index, pair, K, a)
                 calls += len(changed)
                 loss = score(waves)
+                slot_tried[slot] += 1
+                slot_delta[slot] += abs(loss - chain["loss"])
                 if loss <= chain["loss"] or float(torch.rand(())) < math.exp((chain["loss"] - loss) / T):
                     accepted += 1
+                    slot_accepted[slot] += 1
                     for index, (pair, K, a) in changed.items():
                         chain["pairs"][index], chain["K"][index], chain["a"][index] = pair, K, a
                     chain["waves"], chain["loss"] = waves, loss
@@ -333,7 +341,9 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                 for c in range(len(chains) - 1):
                     delta = (1 / temperatures[c] - 1 / temperatures[c + 1]) * (
                         chains[c]["loss"] - chains[c + 1]["loss"])
+                    pair_tried[c] += 1
                     if delta >= 0 or float(torch.rand(())) < math.exp(delta):
+                        pair_accepted[c] += 1
                         chains[c], chains[c + 1] = chains[c + 1], chains[c]
                         exchanges += 1
             log(calls, best["loss"], best["pairs"], models)
@@ -342,7 +352,10 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
             _set_a(models[i], best["a"][i])
     log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_noop": noop,
                      "proposals_accepted": accepted, "sweeps": sweep, "exchanges_accepted": exchanges,
-                     "adam_steps": sweep if adam else 0})
+                     "adam_steps": sweep if adam else 0, "temperatures": list(temperatures),
+                     "chain_acceptance": [a / max(t, 1) for a, t in zip(slot_accepted, slot_tried)],
+                     "chain_mean_abs_delta": [d / max(t, 1) for d, t in zip(slot_delta, slot_tried)],
+                     "exchange_acceptance": [a / max(t, 1) for a, t in zip(pair_accepted, pair_tried)]})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
 
 

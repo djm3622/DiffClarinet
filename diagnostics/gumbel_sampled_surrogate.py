@@ -105,8 +105,11 @@ def fit_sampled(models: nn.ModuleList, target: torch.Tensor, cfg: dict, position
         temperature = cfg["temperature_start"] * (
             cfg["temperature_end"] / cfg["temperature_start"]) ** progress
         weights = (scores / temperature).softmax(0)
+        # Optional floor multiplier for noise_floor losses, annealed geometrically to 1.
+        floor_scale = cfg.get("noise_floor_anneal", 1.0) ** (1.0 - progress)
         losses = torch.stack([_loss(_synth(models, cfg["n_fft"], pairs), spectrum,
-                                    cfg["spectrum_normalization"]) for pairs in assignments])
+                                    cfg["spectrum_normalization"], floor_scale)
+                              for pairs in assignments])
         synthesis_calls += len(assignments) * len(models)
         measured = ((weights.detach() * losses).sum()
                     if weighting == "softmax" else losses.mean())
