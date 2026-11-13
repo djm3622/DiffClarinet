@@ -95,3 +95,16 @@ def test_mcmc_pt_runs_with_the_sqrt_loss():
     history, calls = fit_mcmc_pt(models, target, settings(
         epochs=30, refine_epochs=10, spectrum_normalization="noise_floor_sqrt", temperature_scale=0.02))
     assert calls >= 30 * 4 + 10 and torch.isfinite(torch.tensor(history[-1]["loss"]))
+
+
+def test_set_b_follow_up_configs():
+    for name, count, methods, loss in (("setb_n1_t4_mcmc_pt", 1, ["mcmc_pt"], "multiscale"),
+                                       ("setb_n2_t4_mcmc_pt", 2, ["mcmc_pt"], "multiscale"),
+                                       ("setb_n1_t7d", 1, ["reinforce", "random_search_local"], "noise_floor_sqrt"),
+                                       ("setb_n2_t7d", 2, ["reinforce", "random_search_local"], "noise_floor_sqrt")):
+        config = real.read_config(ROOT / "configs/real_audio_single_note" / f"{name}.yaml", [])
+        assert config["dataset"] == "data/nsynth_guitar_setB" and config["source_counts"] == [count]
+        assert config["methods"] == methods and config["fit"]["spectrum_normalization"] == loss
+        assert config["model"]["output_dc"] == "dc_block" and (config["model"]["L_min"], config["model"]["L_max"]) == (90, 210)
+        if "mcmc_pt" in methods:
+            assert real.mcmc_config(config)["temperature_scale"] == 0.21

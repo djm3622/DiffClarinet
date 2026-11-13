@@ -1,0 +1,58 @@
+# Held-out set B, arm setb_n2_t7d: T7d (square-root noise-floor loss, noise_floor_sqrt, floor from the
+# unfiltered target window; DC block on each source output; learned g) fitted with REINFORCE and
+# local random search. Budgets as n2_t4_multiscale_dc_block.yaml; data/nsynth_guitar_setB, seed 0, L in [90, 210].
+output_dir: output/real_audio_single_note/setb_n2_t7d
+filter: triangle
+dataset: data/nsynth_guitar_setB
+methods:
+- reinforce
+- random_search_local
+source_counts:
+- 2
+seeds:
+- 0
+instances: 32
+threads: 1
+model:
+  L_min: 90
+  L_max: 210
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  output_gain: learned
+  output_dc: dc_block
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: noise_floor_sqrt
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 500
+  show_progress: false
+sampled_gumbel:
+  samples: 8
+  physical_weighting: softmax
+random_search:
+  samples: 8
+  local_radius: 3
+  local_probability: 0.5
+# Same Klapuri settings as configs/pitch_benchmark.yaml.
+classical:
+  frame_size: 8192
+  hop_size: 512
+  bin_cents: 10.0
+  separation_cents: 30.0
