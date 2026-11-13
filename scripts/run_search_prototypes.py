@@ -24,10 +24,13 @@ METHODS = ("rs_kprofile", "rs_swap", "reinforce_elitist", "reinforce_kprofile", 
 MCMC_ABLATIONS = {"mcmc_pt_notemper": {"pt_tempering": False},
                   "mcmc_pt_noswap": {"swap_move": 0.0},
                   "mcmc_pt_onestart": {"pt_one_start": True},
-                  "mcmc_pt_adamka": {"pt_adam_ka": True, "continuous_move": 0.0}}
+                  "mcmc_pt_adamka": {"pt_adam_ka": True, "continuous_move": 0.0},
+                  # Budget curve: the search stops at this fraction of 160k*n; refinement unchanged.
+                  **{f"mcmc_pt_b{round(100 * f):02d}": {"search_budget_fraction": f}
+                     for f in (0.05, 0.1, 0.25, 0.5)}}
 # Coordinate-wise exhaustive sweep, with 1 or 100 Adam steps on K/a after each source visit.
 SWEEPS = {"coord_sweep": {"ka_steps_per_visit": 1}, "coord_sweep_ka100": {"ka_steps_per_visit": 100}}
-EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS)
+EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka")
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
                 swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
@@ -92,6 +95,8 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
         history, calls = fit_random_search(models, target, cfg, progress)
     elif method == "rs_cached":
         history, calls = prototypes.fit_rs_cached(models, target, cfg, progress)
+    elif method == "rs_cached_rwka":
+        history, calls = prototypes.fit_rs_cached_rwka(models, target, cfg, progress)
     elif method == "rs_kprofile":
         history, calls = prototypes.fit_rs_kprofile(models, target, cfg, progress)
     elif method == "reinforce_elitist":

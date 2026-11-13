@@ -238,7 +238,8 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     tempering, adam = cfg.get("pt_tempering", True), cfg.get("pt_adam_ka", False)
     if not tempering:
         temperatures = [min(temperatures)] * len(temperatures)
-    budget = cfg["epochs"] * cfg["samples"] * sources
+    # search_budget_fraction < 1 shortens the search only; the K/a refinement is unchanged.
+    budget = round(cfg.get("search_budget_fraction", 1.0) * cfg["epochs"] * cfg["samples"] * sources)
     log = Log(log_path, cfg["log_calls"])
     calls = sweep = drawn = noop = accepted = exchanges = 0
     optimizer = torch.optim.Adam(_continuous_parameters(models), lr=cfg["continuous_lr"]) if adam else None
@@ -246,6 +247,7 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
     # |loss change| of evaluated proposals, and per-adjacent-pair exchange attempts/accepts.
     slot_tried, slot_accepted = [0] * len(temperatures), [0] * len(temperatures)
     slot_delta = [0.0] * len(temperatures)
+    slot_uphill, slot_uphill_accepted = [0] * len(temperatures), [0] * len(temperatures)
     pair_tried, pair_accepted = [0] * (len(temperatures) - 1), [0] * (len(temperatures) - 1)
 
     def wave(i, pair, K, a):
@@ -321,9 +323,12 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                 loss = score(waves)
                 slot_tried[slot] += 1
                 slot_delta[slot] += abs(loss - chain["loss"])
+                uphill = loss > chain["loss"]
+                slot_uphill[slot] += uphill
                 if loss <= chain["loss"] or float(torch.rand(())) < math.exp((chain["loss"] - loss) / T):
                     accepted += 1
                     slot_accepted[slot] += 1
+                    slot_uphill_accepted[slot] += uphill
                     for index, (pair, K, a) in changed.items():
                         chain["pairs"][index], chain["K"][index], chain["a"][index] = pair, K, a
                     chain["waves"], chain["loss"] = waves, loss
@@ -355,7 +360,10 @@ def fit_mcmc_pt(models, target, cfg, log_path=None):
                      "adam_steps": sweep if adam else 0, "temperatures": list(temperatures),
                      "chain_acceptance": [a / max(t, 1) for a, t in zip(slot_accepted, slot_tried)],
                      "chain_mean_abs_delta": [d / max(t, 1) for d, t in zip(slot_delta, slot_tried)],
-                     "exchange_acceptance": [a / max(t, 1) for a, t in zip(pair_accepted, pair_tried)]})
+                     "chain_uphill_proposals": slot_uphill,
+                     "chain_uphill_acceptance": [a / max(t, 1) for a, t in zip(slot_uphill_accepted, slot_uphill)],
+                     "exchange_acceptance": [a / max(t, 1) for a, t in zip(pair_accepted, pair_tried)],
+                     "search_budget": budget})
     return log.rows, _refine(models, best["pairs"], spectrum, cfg, log, calls)
 
 
@@ -987,4 +995,71 @@ def fit_coord_sweep(models: nn.ModuleList, target, cfg, log_path=None):
     log.rows.append({"calls": calls, "proposals_drawn": drawn, "proposals_accepted": accepted,
                      "source_visits": visits, "complete_visits": complete, "ka_steps": ka_steps,
                      "full_sweeps": complete // sources, "pairs_per_source": [len(g) for g in grids]})
+    return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)
+
+
+def fit_rs_cached_rwka(models: nn.ModuleList, target, cfg, log_path=None):
+    """fit_rs_cached with its Adam K/a step replaced by mcmc_pt's random-walk K/a move.
+
+    Each update draws samples - 1 one-source (L, position) proposals (swaps off) against cached
+    sources and keeps the best if it lowers the loss; then one source's K and a take a Gaussian
+    step (K_step, a_step), kept only if the loss improves. No gradients: a proposal or K/a move is
+    charged one synthesis per source it changes, as in fit_mcmc_pt. Then the usual refinement.
+    """
+    cfg = {**cfg, "swap_probability": 0}
+    n, norm = cfg["n_fft"], cfg["spectrum_normalization"]
+    spectrum = torch.fft.rfft(target[:n])
+    grids, valid = _grids(models)
+    sources = len(models)
+    budget = cfg["epochs"] * cfg["samples"] * sources
+    incumbent = [_uniform(grids, i) for i in range(sources)]
+    log = Log(log_path, cfg["log_calls"])
+    drawn = noop = accepted = ka_moves = ka_accepted = updates = 0
+    with torch.no_grad():
+        waves = [_wave(m, n, p) for m, p in zip(models, incumbent)]
+        calls = sources
+        current = float(_loss(sum(waves), spectrum, norm))
+        while calls < budget:
+            total, best = sum(waves), None
+            for _ in range(cfg["samples"] - 1):
+                drawn += 1
+                candidate = propose(grids, valid, incumbent, cfg)
+                changed = [i for i, (a, b) in enumerate(zip(candidate, incumbent)) if a != b]
+                if not changed:
+                    noop += 1
+                    continue
+                trial, fresh = total, {}
+                for i in changed:
+                    fresh[i] = _wave(models[i], n, candidate[i])
+                    trial = trial - waves[i] + fresh[i]
+                calls += len(changed)
+                score = float(_loss(trial, spectrum, norm))
+                if score < current:
+                    current, best = score, (candidate, fresh)
+            if best is not None:
+                accepted += 1
+                incumbent = best[0]
+                for i, wave in best[1].items():
+                    waves[i] = wave
+            i = int(torch.randint(sources, ()))
+            K = float(models[i].scaled_gain()) + cfg["K_step"] * float(torch.randn(()))
+            a = float(models[i].scaled_allplus()) + cfg["a_step"] * float(torch.randn(()))
+            if models[i].gain_min < K < models[i].gain_max and 0 < a < 1:
+                ka_moves += 1
+                old = (float(models[i].scaled_gain()), float(models[i].scaled_allplus()))
+                _set_K(models[i], K)
+                _set_a(models[i], a)
+                wave = _wave(models[i], n, incumbent[i])
+                calls += 1
+                score = float(_loss(sum(waves) - waves[i] + wave, spectrum, norm))
+                if score < current:
+                    ka_accepted += 1
+                    current, waves[i] = score, wave
+                else:
+                    _set_K(models[i], old[0])
+                    _set_a(models[i], old[1])
+            updates += 1
+            log(calls, current, incumbent, models)
+    log.rows.append({"calls": calls, "updates": updates, "proposals_drawn": drawn, "proposals_noop": noop,
+                     "proposals_accepted": accepted, "ka_moves": ka_moves, "ka_accepted": ka_accepted})
     return log.rows, _refine(models, incumbent, spectrum, cfg, log, calls)

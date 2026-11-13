@@ -121,6 +121,38 @@ class PrototypeTests(unittest.TestCase):
                 else:
                     self.assertEqual(row["adam_steps"], 0)
 
+    def test_budget_fraction_shortens_only_the_search(self) -> None:
+        models = nn.ModuleList(make_source("A") for _ in range(2))
+        target = _synth(models, 32, [(5, 2), (6, 3)]).detach()
+        settings = cfg(epochs=40, refine_epochs=3)
+        for fraction in (0.05, 0.25, 1.0):
+            with self.subTest(fraction=fraction):
+                torch.manual_seed(11)
+                history, calls = p.fit_mcmc_pt(models, target, {**settings, "search_budget_fraction": fraction})
+                row = next(r for r in history if "proposals_drawn" in r)
+                self.assertEqual(row["search_budget"], round(fraction * 40 * 4 * 2))
+                self.assertLess(row["calls"], row["search_budget"] + 2 + 2 * 6)
+                self.assertEqual(calls, row["calls"] + 3 * 2)
+                self.assertTrue(all(0 <= u <= 1 for u in row["chain_uphill_acceptance"]))
+                self.assertTrue(all(u <= t for u, t in zip(row["chain_uphill_proposals"],
+                                                          [row["proposals_drawn"]] * 6)))
+
+    def test_rs_cached_rwka_uses_no_gradient_and_greedy_ka_moves(self) -> None:
+        torch.manual_seed(12)
+        models = nn.ModuleList(make_source("dp") for _ in range(3))
+        target = _synth(models, 32, [(5, 2), (6, 3), (5, 3)]).detach()
+        settings = cfg(epochs=40, refine_epochs=1, swap_probability=1.0)
+        with mock.patch.object(p, "propose", wraps=p.propose) as proposal:
+            history, _ = p.fit_rs_cached_rwka(models, target, settings)
+        self.assertTrue(all(call.args[3]["swap_probability"] == 0 for call in proposal.call_args_list))
+        row = next(r for r in history if "ka_moves" in r)
+        self.assertEqual(row["proposals_drawn"], row["updates"] * (settings["samples"] - 1))
+        self.assertGreater(row["ka_moves"], 0)
+        self.assertLessEqual(row["ka_accepted"], row["ka_moves"])
+        self.assertLessEqual(row["calls"], 40 * 4 * 3 + 3 * (settings["samples"] - 1) + 1)
+        loss_rows = [r["loss"] for r in history if "loss" in r]
+        self.assertTrue(all(b <= a + 1e-9 for a, b in zip(loss_rows, loss_rows[1:-1])))
+
     def test_one_start_copies_one_draw(self) -> None:
         grids = [make_source("dp").all_pairs() for _ in range(3)]
         torch.manual_seed(8)
