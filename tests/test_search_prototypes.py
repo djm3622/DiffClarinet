@@ -7,7 +7,7 @@ from unittest import mock
 import torch
 from torch import nn
 
-from diagnostics import search_prototypes as p
+from diagnostics import lagrange_descent as gd, search_prototypes as p
 from diagnostics.random_search import fit_random_search, propose
 from model.kps.training import _synth
 from scripts.run_search_prototypes import MCMC_ABLATIONS, SETTINGS, main
@@ -152,6 +152,52 @@ class PrototypeTests(unittest.TestCase):
         self.assertLessEqual(row["calls"], 40 * 4 * 3 + 3 * (settings["samples"] - 1) + 1)
         loss_rows = [r["loss"] for r in history if "loss" in r]
         self.assertTrue(all(b <= a + 1e-9 for a, b in zip(loss_rows, loss_rows[1:-1])))
+
+    def test_tilted_loss_is_zero_at_the_target_and_normalized(self) -> None:
+        torch.manual_seed(13)
+        target = torch.randn(256)
+        loss = gd.tilted_loss(256, target)
+        self.assertAlmostEqual(float(loss(target)), 0.0, places=6)
+        self.assertAlmostEqual(float(loss(torch.zeros(256))), 1.0, places=5)
+
+    def test_lagrange_gd_charges_descent_polish_and_refinement(self) -> None:
+        from scripts import run_delay_benchmark as benchmark
+        config = {"model": {"L_min": 20, "L_max": 30, "position_min": 1, "position_max": 15,
+                            "initial_K": 0.9, "initial_a": 0.5, "gain_min": 0.5, "gain_max": 1.0},
+                  "fit": {"n_fft": 256}}
+        for kind, sources in (("comb", 1), ("triangle", 2)):
+            with self.subTest(kind=kind, sources=sources):
+                torch.manual_seed(14)
+                truth_models = benchmark.make_models(config, kind, "random_search_local", sources)
+                truth = [(24, 6), (28, 11)][:sources]
+                with torch.no_grad():
+                    for m in truth_models:
+                        p._set_K(m, 0.8)
+                target = _synth(truth_models, 256, truth).detach()
+                models = benchmark.make_models(config, kind, "random_search_local", sources)
+                settings = cfg(n_fft=256, gd_steps=20, gd_restarts=2, refine_epochs=2)
+                history, calls = gd.fit_lagrange_gd(models, target, settings, kind, config, truth)
+                row = next(r for r in history if "descent_syntheses" in r)
+                self.assertEqual(row["descent_syntheses"], 2 * (20 + 1) * sources)
+                passes = 2 if sources > 1 else 1
+                self.assertLessEqual(row["polish_syntheses"], passes * sources * (6 * 2 * 121 + sources - 1))
+                self.assertEqual(calls, row["calls"] + 2 * sources)
+                self.assertEqual(len(row["restart_losses"]), 2)
+                self.assertIsNotNone(row["set_match_after_polish"])
+                for pair in row["pairs_after_polish"]:
+                    self.assertTrue(gd.MARGIN <= pair[1] <= pair[0] - gd.MARGIN)
+
+    def test_direction_fraction_runs_at_truth_k_and_a(self) -> None:
+        from scripts import run_delay_benchmark as benchmark
+        config = {"model": {"L_min": 20, "L_max": 30, "position_min": 1, "position_max": 15,
+                            "initial_K": 0.9, "initial_a": 0.5, "gain_min": 0.5, "gain_max": 1.0},
+                  "fit": {"n_fft": 256}}
+        truth_model = benchmark.make_models(config, "comb", "random_search_local", 1)
+        with torch.no_grad():
+            p._set_K(truth_model[0], 0.8)
+        target = _synth(truth_model, 256, [(24, 6)]).detach()
+        out = gd.direction_fraction(config, "comb", target, (24, 6), 0.8, 0.5, [21, 27, 29], 256)
+        self.assertEqual(len(out), 3)
 
     def test_one_start_copies_one_draw(self) -> None:
         grids = [make_source("dp").all_pairs() for _ in range(3)]

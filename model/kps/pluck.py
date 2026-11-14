@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .dkps_fixed import KarplusStrongFixed
+from .fractional_delay import LagrangeDelayPairMixin, delayed_loop_filter
 from .relaxation_pair import ContinuousDelayPairMixin
 
 
@@ -227,3 +228,26 @@ class KarplusStrongPluckRelaxation(ContinuousDelayPairMixin, KarplusStrongPluck)
 
     def scaled_dp(self) -> int:
         return self.selected_delays()[1]
+
+
+class KarplusStrongPluckLagrange(LagrangeDelayPairMixin, KarplusStrongPluck):
+    """Continuous L and dp; causal synthesis with Lagrange fractional delays."""
+
+    def __init__(self, *args, delay_len_init: float | None = None,
+                 position_init: float | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_continuous_pair(delay_len_init, position_init, "dp")
+
+    def scaled_dp(self) -> int:
+        return self.selected_delays()[1]
+
+    def lagrange_synth(self, n_samples: int,
+                       straight_through: bool = False) -> torch.Tensor:
+        L, dp = self.synthesis_delays(straight_through)
+        size = int(torch.maximum(L, dp).detach().floor()) + 8
+        K, numerator, denominator = self._loop_coefficients(L, size)
+        b = -K * (F.pad(numerator, (0, size - 3))
+                  - delayed_loop_filter(numerator, dp, size))
+        impulse = L.new_zeros(n_samples)
+        impulse[0] = 1
+        return torchaudio.functional.lfilter(impulse, denominator, b, clamp=False)

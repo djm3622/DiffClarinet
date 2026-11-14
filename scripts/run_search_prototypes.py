@@ -11,7 +11,7 @@ import traceback
 import numpy as np
 import torch
 
-from diagnostics import search_prototypes as prototypes
+from diagnostics import lagrange_descent, search_prototypes as prototypes
 from diagnostics.random_search import fit_random_search
 from scripts import run_delay_benchmark as benchmark
 from scripts.eval.source_baselines import loop_pitch, multipitch_klapuri
@@ -30,7 +30,11 @@ MCMC_ABLATIONS = {"mcmc_pt_notemper": {"pt_tempering": False},
                      for f in (0.05, 0.1, 0.25, 0.5)}}
 # Coordinate-wise exhaustive sweep, with 1 or 100 Adam steps on K/a after each source visit.
 SWEEPS = {"coord_sweep": {"ka_steps_per_visit": 1}, "coord_sweep_ka100": {"ka_steps_per_visit": 100}}
-EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka")
+# Gradient-descent baseline (Lagrange delays, tilted/square-root loss, restarts, polish), 1,500 steps
+# per start: 8 starts (12,000*n syntheses) or 100 (150,000*n, inside the 160,000*n search budget).
+LAGRANGE_GD = {"lagrange_gd_small": {"gd_restarts": 8, "gd_steps": 1500},
+               "lagrange_gd_matched": {"gd_restarts": 100, "gd_steps": 1500}}
+EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka", *LAGRANGE_GD)
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],
                 swap_move=0.1, continuous_move=0.3, K_step=0.02, a_step=0.03, exchange_every=20,
@@ -97,6 +101,12 @@ def run_case(row: dict, config: dict, paths: list[Path], root: Path, scale: floa
         history, calls = prototypes.fit_rs_cached(models, target, cfg, progress)
     elif method == "rs_cached_rwka":
         history, calls = prototypes.fit_rs_cached_rwka(models, target, cfg, progress)
+    elif method in LAGRANGE_GD:
+        # --scale shortens the descent too, so smoke tests stay short.
+        steps = max(int(LAGRANGE_GD[method]["gd_steps"] * scale), 2)
+        history, calls = lagrange_descent.fit_lagrange_gd(
+            models, target, {**cfg, **LAGRANGE_GD[method], "gd_steps": steps}, row["filter"], config,
+            [(int(v["L"]), int(v["position"])) for v in truth], progress)
     elif method == "rs_kprofile":
         history, calls = prototypes.fit_rs_kprofile(models, target, cfg, progress)
     elif method == "reinforce_elitist":
