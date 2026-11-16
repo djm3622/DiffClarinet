@@ -29,14 +29,17 @@ from scipy.optimize import linear_sum_assignment
 import torch
 import yaml
 
+from diagnostics.lagrange_descent import fit_lagrange_gd
 from diagnostics.mcmc_pt import fit_mcmc_pt
 from scripts import run_delay_benchmark as benchmark
 from scripts.eval.source_baselines import (autocorrelation_pitches, loop_pitch,
                                            multipitch_klapuri, pitch_metrics)
 
-METHODS = {"reinforce", "gumbel_sampled", "random_search_local", "mcmc_pt"}
-# mcmc_pt shares random search's model setup (fixed initial K and a) and fit settings.
-SETUP = {"mcmc_pt": "random_search_local"}
+METHODS = {"reinforce", "gumbel_sampled", "random_search_local", "mcmc_pt", "lagrange_gd"}
+# mcmc_pt and lagrange_gd share random search's model setup (fixed initial K and a) and fit settings.
+SETUP = {"mcmc_pt": "random_search_local", "lagrange_gd": "random_search_local"}
+GD_KEYS = {"restarts", "steps", "delay_lr", "delay_lr_end", "ka_lr", "ka_lr_end", "g_lr", "g_lr_end",
+           "polish_steps", "polish_g_lr", "polish_g_lr_end"}
 MCMC_KEYS = {"temperatures", "swap_move", "continuous_move", "K_step", "a_step", "g_step",
              "exchange_every"}
 THRESHOLDS = (25, 50)
@@ -58,6 +61,12 @@ def read_config(path: Path, overrides: list[str]) -> dict:
         expected.add("mcmc_pt")
         if not MCMC_KEYS <= set(config.get("mcmc_pt", {})) <= MCMC_KEYS | {"temperature_scale"}:
             raise ValueError(f"mcmc_pt needs settings {sorted(MCMC_KEYS)} (temperature_scale optional)")
+    if "lagrange_gd" in config["methods"]:
+        expected.add("lagrange_gd")
+        if set(config.get("lagrange_gd", {})) != GD_KEYS:
+            raise ValueError(f"lagrange_gd needs settings {sorted(GD_KEYS)}")
+        if kind(config) != "triangle":
+            raise ValueError("lagrange_gd is implemented for the triangle model.")
     if "filter" in config:
         expected.add("filter")
         if config["filter"] not in {"comb", "triangle"}:
@@ -117,6 +126,14 @@ def mcmc_config(config: dict) -> dict:
             "log_calls": 2000}
 
 
+def gd_config(config: dict) -> dict:
+    """Restarts and learning rates from the config; refinement and loss as the search rows."""
+    fit = config["fit"]
+    return {**config["lagrange_gd"], "refine_epochs": fit["refine_epochs"], "n_fft": fit["n_fft"],
+            "continuous_lr": fit["continuous_lr"], "spectrum_normalization": fit["spectrum_normalization"],
+            "log_calls": 2000}
+
+
 def fit_case(row: dict, config: dict, output: Path) -> dict:
     random.seed(row["seed"])
     np.random.seed(row["seed"])
@@ -133,6 +150,9 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
     elif method == "mcmc_pt":
         history, syntheses = fit_mcmc_pt(models, target, mcmc_config(config),
                                          output / "progress.jsonl")
+    elif method == "lagrange_gd":
+        history, syntheses = fit_lagrange_gd(models, target, gd_config(config), config,
+                                             output / "progress.jsonl")
     elif method in benchmark.RANDOM_SEARCH:
         history, syntheses = benchmark.fit_random_search(
             models, target, benchmark.random_search_config(config, method),
@@ -186,7 +206,8 @@ def fit_case(row: dict, config: dict, output: Path) -> dict:
                "training_source_syntheses": syntheses, "sample_rate": rate,
                "fit_config": {**benchmark.asdict(benchmark.filtered_config(
                                   config, SETUP.get(method, method))), "method": method,
-                              **({"mcmc_pt": mcmc_config(config)} if method == "mcmc_pt" else {})},
+                              **({"mcmc_pt": mcmc_config(config)} if method == "mcmc_pt" else {}),
+                              **({"lagrange_gd": gd_config(config)} if method == "lagrange_gd" else {})},
                "fit_domain": "finite_causal_first_n_fft", "evaluation_domain": "full_causal_audio",
                "pitch_reference": "nominal NSynth MIDI f0 (A4 = 440 Hz)",
                "filter": kind(config),

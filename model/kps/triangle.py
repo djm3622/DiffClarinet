@@ -3,8 +3,10 @@
 import torch
 import torchaudio
 from torch import nn
+from torch.nn import functional as F
 
 from .dkps_fixed import KarplusStrongFixed
+from .fractional_delay import LagrangeDelayPairMixin
 from .relaxation_pair import ContinuousDelayPairMixin
 
 
@@ -187,3 +189,32 @@ class KarplusStrongTriangleRelaxation(ContinuousDelayPairMixin, KarplusStrongTri
                  position_init: float | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._init_continuous_pair(delay_len_init, position_init, "A")
+
+
+class KarplusStrongTriangleLagrange(LagrangeDelayPairMixin, KarplusStrongTriangle):
+    """Continuous L and A through a Lagrange fractional loop delay.
+
+    The output stage is the integer model's: the same DC block and learned output gain.
+    At integer delays the synthesis equals time_domain_synth.
+    """
+
+    def __init__(self, *args, delay_len_init: float | None = None,
+                 position_init: float | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_continuous_pair(delay_len_init, position_init, "A")
+
+    def lagrange_synth(self, n_samples: int,
+                       straight_through: bool = False) -> torch.Tensor:
+        L, A = self.synthesis_delays(straight_through)
+        size = int(L.detach().floor()) + 8
+        K, numerator, denominator = self._loop_coefficients(L, size)
+        excitation = self.excitation(n_samples, self.L_logits.new_ones(1), L, A, K)
+        output = torchaudio.functional.lfilter(
+            excitation, denominator, F.pad(numerator, (0, size - 3)), clamp=False)
+        if self.dc_pole is not None:
+            output = torchaudio.functional.lfilter(
+                output, output.new_tensor([1.0, -self.dc_pole]), output.new_tensor([1.0, -1.0]),
+                clamp=False)
+        if not bool(torch.isfinite(output).all()):
+            raise FloatingPointError("Nonfinite causal triangle output.")
+        return output * self.output_gain() if hasattr(self, "log_output_gain") else output

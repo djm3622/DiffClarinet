@@ -1,0 +1,72 @@
+# Held-out set B, arm setb_n1_t7d_gd: gradient descent (Lagrange-relaxed delays, 100 restarts,
+# polish) on the T7d model and loss: triangle, square-root noise-floor loss, DC block, learned
+# output gain; same items, order and seed as setb_n1_t7d_mcmc_pt.yaml (paired). Frozen in
+# PROTOCOL_ADDENDUM.md before the run.
+output_dir: output/real_audio_single_note/setb_n1_t7d_gd
+filter: triangle
+dataset: data/nsynth_guitar_setB
+methods:
+- lagrange_gd
+source_counts:
+- 1
+seeds:
+- 0
+instances: 32
+threads: 1
+model:
+  L_min: 90
+  L_max: 210
+  position_min: 1
+  position_max: 100
+  initial_K: 0.9
+  initial_a: 0.5
+  initial_L: 150.5
+  gain_min: 0.5
+  gain_max: 1.0
+  output_gain: learned
+  output_dc: dc_block
+fit:
+  epochs: 20000
+  refine_epochs: 20000
+  n_fft: 8192
+  reinforce_samples: 8
+  continuous_lr: 0.01
+  discrete_lr: 0.003
+  spectrum_normalization: noise_floor_sqrt
+  initial_uniform_prior_weight: 0.05
+  final_uniform_prior_weight: 0.001
+  prior_anneal_epochs: 20000
+  ordinal_smoothness_weight: 0.0001
+  advantage_clip: 5.0
+  gumbel_temperature: 1.0
+  gumbel_temperature_end: 0.1
+  exhaustive_cap: 20000
+  print_frequency: 500
+  show_progress: false
+sampled_gumbel:
+  samples: 8
+  physical_weighting: softmax
+random_search:
+  samples: 8
+  local_radius: 3
+  local_probability: 0.5
+classical:
+  frame_size: 8192
+  hop_size: 512
+  bin_cents: 10.0
+  separation_cents: 30.0
+# Gradient descent (diagnostics/lagrange_descent.py): 100 starts x 1,500 Adam steps, delays at
+# 0.3 -> 0.01, K and a at 0.01 -> 0.001 (synthetic row), g at 0.01 -> 0.001 (chosen as K and a);
+# polish refits K (0.02), a (0.05) and g (0.02 -> 0.001) for 120 steps under the same loss.
+lagrange_gd:
+  restarts: 100
+  steps: 1500
+  delay_lr: 0.3
+  delay_lr_end: 0.01
+  ka_lr: 0.01
+  ka_lr_end: 0.001
+  g_lr: 0.01
+  g_lr_end: 0.001
+  polish_steps: 120
+  polish_g_lr: 0.02
+  polish_g_lr_end: 0.001
