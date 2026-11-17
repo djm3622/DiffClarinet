@@ -1045,7 +1045,7 @@ def noise_floor_scale(epoch_index: int, config: "TriangleFitConfig") -> float:
 # STFT magnitudes (hop = size / 4), averaged over resolutions. Unlike one long rFFT it sees
 # how the spectrum changes over time (decay), and the convergence term weighs loud bins.
 # multiscale_noise_floor adds the two losses at equal weight.
-SPECTRUM_LOSSES = {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag", "multiscale",
+SPECTRUM_LOSSES = {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag", "mrstft", "mrstft_lin", "multiscale",
                    "multiscale_noise_floor"}
 MULTISCALE_FFT_SIZES = (4096, 2048, 1024, 512, 256)
 MULTISCALE_EPS = 1e-7
@@ -1129,8 +1129,23 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
             - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
 
 
+# auraloss MultiResolutionSTFTLoss at its defaults (FFT 1024/2048/512, hops 120/240/50, Hann windows
+# 600/1200/240): "mrstft" is spectral convergence + log magnitude (its default weights), "mrstft_lin"
+# linear magnitude only.
+MRSTFT_WEIGHTS = {"mrstft": dict(w_sc=1.0, w_log_mag=1.0, w_lin_mag=0.0),
+                  "mrstft_lin": dict(w_sc=0.0, w_log_mag=0.0, w_lin_mag=1.0)}
+_MRSTFT = {}
+
+
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
           normalization: str, floor_scale: float = 1.0) -> torch.Tensor:
+    if normalization in MRSTFT_WEIGHTS:
+        if normalization not in _MRSTFT:
+            from auraloss.freq import MultiResolutionSTFTLoss
+            _MRSTFT[normalization] = MultiResolutionSTFTLoss(**MRSTFT_WEIGHTS[normalization])
+        # Every caller passes rfft(target window); invert it to recover the window exactly.
+        target = torch.fft.irfft(target_spectrum, n=prediction.numel())
+        return _MRSTFT[normalization](prediction[None, None], target[None, None])
     if normalization == "multiscale_noise_floor":
         return (_loss(prediction, target_spectrum, "multiscale")
                 + _loss(prediction, target_spectrum, "noise_floor", floor_scale))
