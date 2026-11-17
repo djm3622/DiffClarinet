@@ -161,6 +161,23 @@ class PrototypeTests(unittest.TestCase):
         self.assertAlmostEqual(float(_loss(target, spectrum, "mag")), 0.0, places=6)
         self.assertAlmostEqual(float(_loss(torch.zeros(256), spectrum, "mag")), 1.0, places=5)
 
+    def test_mrstft_losses_match_auraloss_and_vanish_at_the_target(self) -> None:
+        from auraloss.freq import MultiResolutionSTFTLoss
+        from model.kps.training import _loss
+        torch.manual_seed(16)
+        target, other = torch.randn(4096), torch.randn(4096)
+        spectrum = torch.fft.rfft(target)
+        for name, weights in (("mrstft", {}), ("mrstft_lin", dict(w_sc=0.0, w_log_mag=0.0, w_lin_mag=1.0))):
+            reference = MultiResolutionSTFTLoss(**weights)(other[None, None], target[None, None])
+            self.assertAlmostEqual(float(_loss(other, spectrum, name)), float(reference), places=4)
+            self.assertLess(float(_loss(target, spectrum, name)), 1e-3)
+
+    def test_tilted_floor_reduces_to_tilted_without_a_floor(self) -> None:
+        torch.manual_seed(17)
+        target, other = torch.randn(256), torch.randn(256)
+        self.assertGreaterEqual(float(gd.tilted_floor_loss(256, target)(other)), 0.0)
+        self.assertGreater(float(gd.tilted_floor_loss(256, target)(target)), float(gd.tilted_loss(256, target)(target)))
+
     def test_tilted_loss_is_zero_at_the_target_and_normalized(self) -> None:
         torch.manual_seed(13)
         target = torch.randn(256)

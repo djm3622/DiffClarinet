@@ -14,7 +14,7 @@ from torch import nn
 
 from diagnostics.search_prototypes import Log, _refine, _set_K, _set_a, _wave
 from model.kps.pluck import KarplusStrongPluckLagrange
-from model.kps.training import _loss
+from model.kps.training import _loss, noise_floor_power
 from model.kps.triangle import KarplusStrongTriangleLagrange
 
 MARGIN, K_MAX, A_MAX = 3, 0.9995, 0.99
@@ -28,6 +28,18 @@ def tilted_loss(n: int, target: torch.Tensor):
     weighted_target = torch.fft.rfft(target[:n]).abs() * weight
     scale = weighted_target.mean()
     return lambda x: (torch.fft.rfft(x[:n]).abs() * weight - weighted_target).abs().mean() / scale
+
+
+def tilted_floor_loss(n: int, target: torch.Tensor):
+    """tilted_loss with the model magnitude replaced by sqrt(|X|^2 + Nf) before weighting; Nf as noise_floor_sqrt."""
+    omega = torch.linspace(0, math.pi, n // 2 + 1, dtype=target.dtype)
+    weight = 1 / (omega.square() + TILT_CUTOFF ** 2)
+    spectrum = torch.fft.rfft(target[:n])
+    floor = noise_floor_power(spectrum).detach()
+    weighted_target = spectrum.abs() * weight
+    scale = weighted_target.mean()
+    return lambda x: ((torch.fft.rfft(x[:n]).abs().square() + floor).sqrt() * weight
+                      - weighted_target).abs().mean() / scale
 
 
 def _cosine(start: float, end: float, step: int, steps: int) -> float:
@@ -161,6 +173,8 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
     comb_loss, triangle_loss = cfg.get("gd_comb_loss", "tilted"), cfg.get("gd_triangle_loss", "noise_floor_sqrt")
     if kind == "comb" and comb_loss == "tilted":
         descent_loss = tilted_loss(n, target)
+    elif kind == "comb" and comb_loss == "tilted_floor":
+        descent_loss = tilted_floor_loss(n, target)
     else:
         name = comb_loss if kind == "comb" else triangle_loss
         descent_loss = lambda x: _loss(x, spectrum, name)

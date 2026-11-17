@@ -809,7 +809,8 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag"}:
+        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag",
+                                               "mrstft", "mrstft_lin"}:
             raise ValueError("Spectrum normalization must be 'peak', 'none', 'noise_floor' "
                              "or 'noise_floor_sqrt'.")
         if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
@@ -1063,8 +1064,26 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
             - to_log_mag(target_spectrum, rel_to_max=False)).abs().mean()
 
 
+# auraloss MultiResolutionSTFTLoss at its defaults (FFT 1024/2048/512, hops 120/240/50, Hann windows
+# 600/1200/240): "mrstft" is spectral convergence + log magnitude (its default weights), "mrstft_lin"
+# linear magnitude only. The target window is recovered exactly from its rfft.
+MRSTFT_WEIGHTS = {"mrstft": dict(w_sc=1.0, w_log_mag=1.0, w_lin_mag=0.0),
+                  "mrstft_lin": dict(w_sc=0.0, w_log_mag=0.0, w_lin_mag=1.0)}
+_MRSTFT = {}
+
+
+def _mrstft(prediction: torch.Tensor, target_spectrum: torch.Tensor, normalization: str) -> torch.Tensor:
+    if normalization not in _MRSTFT:
+        from auraloss.freq import MultiResolutionSTFTLoss
+        _MRSTFT[normalization] = MultiResolutionSTFTLoss(**MRSTFT_WEIGHTS[normalization])
+    target = torch.fft.irfft(target_spectrum, n=prediction.shape[-1])
+    return _MRSTFT[normalization](prediction[None, None], target[None, None])
+
+
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
           normalization: str, floor_scale: float = 1.0) -> torch.Tensor:
+    if normalization in MRSTFT_WEIGHTS:
+        return _mrstft(prediction, target_spectrum, normalization)
     return _triangle_spectral_loss(torch.fft.rfft(prediction),
                                    target_spectrum, normalization, floor_scale)
 
