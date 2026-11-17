@@ -1045,7 +1045,7 @@ def noise_floor_scale(epoch_index: int, config: "TriangleFitConfig") -> float:
 # STFT magnitudes (hop = size / 4), averaged over resolutions. Unlike one long rFFT it sees
 # how the spectrum changes over time (decay), and the convergence term weighs loud bins.
 # multiscale_noise_floor adds the two losses at equal weight.
-SPECTRUM_LOSSES = {"peak", "none", "noise_floor", "noise_floor_sqrt", "multiscale",
+SPECTRUM_LOSSES = {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag", "multiscale",
                    "multiscale_noise_floor"}
 MULTISCALE_FFT_SIZES = (4096, 2048, 1024, 512, 256)
 MULTISCALE_EPS = 1e-7
@@ -1111,6 +1111,9 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
         return (energy_weights(target_spectrum, options["lam"], options["gamma"]) * difference).sum()
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
+    if normalization == "mag":
+        # Linear-magnitude L1 with no noise floor: the square-root loss's control.
+        return (prediction.abs() - target_spectrum.abs()).abs().mean() / target_spectrum.abs().mean()
     if normalization in {"noise_floor", "noise_floor_sqrt"}:
         # Prediction plus the estimated noise power against the observed target,
         # so troughs that noise fills in do not dominate the error. A floor_scale
