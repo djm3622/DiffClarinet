@@ -153,6 +153,14 @@ class PrototypeTests(unittest.TestCase):
         loss_rows = [r["loss"] for r in history if "loss" in r]
         self.assertTrue(all(b <= a + 1e-9 for a, b in zip(loss_rows, loss_rows[1:-1])))
 
+    def test_mag_loss_is_linear_magnitude_l1_without_a_floor(self) -> None:
+        from model.kps.training import _loss
+        torch.manual_seed(15)
+        target = torch.randn(256)
+        spectrum = torch.fft.rfft(target)
+        self.assertAlmostEqual(float(_loss(target, spectrum, "mag")), 0.0, places=6)
+        self.assertAlmostEqual(float(_loss(torch.zeros(256), spectrum, "mag")), 1.0, places=5)
+
     def test_tilted_loss_is_zero_at_the_target_and_normalized(self) -> None:
         torch.manual_seed(13)
         target = torch.randn(256)

@@ -27,13 +27,19 @@ MCMC_ABLATIONS = {"mcmc_pt_notemper": {"pt_tempering": False},
                   "mcmc_pt_adamka": {"pt_adam_ka": True, "continuous_move": 0.0},
                   # Budget curve: the search stops at this fraction of 160k*n; refinement unchanged.
                   **{f"mcmc_pt_b{round(100 * f):02d}": {"search_budget_fraction": f}
-                     for f in (0.05, 0.1, 0.25, 0.5)}}
+                     for f in (0.05, 0.1, 0.25, 0.5)},
+                  # 50,000 search syntheses per source (of 160,000).
+                  "mcmc_pt_50k": {"search_budget_fraction": 50000 / 160000}}
 # Coordinate-wise exhaustive sweep, with 1 or 100 Adam steps on K/a after each source visit.
 SWEEPS = {"coord_sweep": {"ka_steps_per_visit": 1}, "coord_sweep_ka100": {"ka_steps_per_visit": 100}}
 # Gradient-descent baseline (Lagrange delays, tilted/square-root loss, restarts, polish), 1,500 steps
 # per start: 8 starts (12,000*n syntheses) or 100 (150,000*n, inside the 160,000*n search budget).
 LAGRANGE_GD = {"lagrange_gd_small": {"gd_restarts": 8, "gd_steps": 1500},
-               "lagrange_gd_matched": {"gd_restarts": 100, "gd_steps": 1500}}
+               "lagrange_gd_matched": {"gd_restarts": 100, "gd_steps": 1500},
+               # Noise-floor pilot, 25 starts: the paper's losses, and linear magnitude for both models.
+               "lagrange_gd_r25": {"gd_restarts": 25, "gd_steps": 1500},
+               "lagrange_gd_r25_mag": {"gd_restarts": 25, "gd_steps": 1500, "gd_triangle_loss": "mag",
+                                       "gd_comb_loss": "mag"}}
 EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka", *LAGRANGE_GD)
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],

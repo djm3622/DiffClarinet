@@ -809,7 +809,7 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt"}:
+        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag"}:
             raise ValueError("Spectrum normalization must be 'peak', 'none', 'noise_floor' "
                              "or 'noise_floor_sqrt'.")
         if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
@@ -1045,6 +1045,9 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
                             floor_scale: float = 1.0) -> torch.Tensor:
     if normalization == "peak":
         return loss_fn(prediction, target_spectrum)
+    if normalization == "mag":
+        # Linear-magnitude L1 with no noise floor: the square-root loss's control.
+        return (prediction.abs() - target_spectrum.abs()).abs().mean() / target_spectrum.abs().mean()
     if normalization in {"noise_floor", "noise_floor_sqrt"}:
         # Prediction plus the estimated noise power against the observed target,
         # so troughs that noise fills in do not dominate the error. A floor_scale

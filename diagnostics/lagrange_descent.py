@@ -156,8 +156,14 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
     """Return (history, charged syntheses); leaves `models` (integer) at the polished, refined pairs."""
     n, sources = cfg["n_fft"], len(models)
     spectrum = torch.fft.rfft(target[:n])
-    descent_loss = (tilted_loss(n, target) if kind == "comb"
-                    else lambda x: _loss(x, spectrum, "noise_floor_sqrt"))
+    # Descent loss: tilted (comb) and square-root (triangle) by default; gd_comb_loss and
+    # gd_triangle_loss name another _loss normalization instead (for loss controls).
+    comb_loss, triangle_loss = cfg.get("gd_comb_loss", "tilted"), cfg.get("gd_triangle_loss", "noise_floor_sqrt")
+    if kind == "comb" and comb_loss == "tilted":
+        descent_loss = tilted_loss(n, target)
+    else:
+        name = comb_loss if kind == "comb" else triangle_loss
+        descent_loss = lambda x: _loss(x, spectrum, name)
     valid = [set(m.all_pairs()) for m in models]
     log = Log(log_path, cfg["log_calls"])
     calls, losses, best = 0, [], None
