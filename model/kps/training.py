@@ -9,7 +9,7 @@ phase two freezes the delays and refines K and a against causal audio."""
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import product
-from math import log, prod
+from math import log, pi, prod
 
 import torch
 from torch import fft, optim
@@ -809,8 +809,9 @@ class TriangleFitConfig:
                 or len(set(self.exhaustive_gain_grid)) != len(self.exhaustive_gain_grid)
                 or not all(0 < K < 1 for K in self.exhaustive_gain_grid)):
             raise ValueError("A gain grid needs exhaustive search and distinct K in (0, 1).")
-        if self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag",
-                                               "mrstft", "mrstft_lin"}:
+        if (self.spectrum_normalization not in {"peak", "none", "noise_floor", "noise_floor_sqrt", "mag", "tilt",
+                                                "tilt_log", "mrstft", "mrstft_lin", "mrstft_log"}
+                and not self.spectrum_normalization.startswith("mix:")):
             raise ValueError("Spectrum normalization must be 'peak', 'none', 'noise_floor' "
                              "or 'noise_floor_sqrt'.")
         if self.noise_floor_anneal < 1 or (self.noise_floor_anneal > 1 and not (
@@ -1049,6 +1050,17 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
     if normalization == "mag":
         # Linear-magnitude L1 with no noise floor: the square-root loss's control.
         return (prediction.abs() - target_spectrum.abs()).abs().mean() / target_spectrum.abs().mean()
+    if normalization in {"tilt", "tilt_log"}:
+        # Tilted weight w = 1 / (omega^2 + omega_c^2), omega_c = 2 pi / 400 rad/sample, over the rfft bins.
+        omega = torch.linspace(0, pi, target_spectrum.numel(), dtype=target_spectrum.real.dtype,
+                               device=target_spectrum.device)
+        weight = 1 / (omega.square() + (2 * pi / 400) ** 2)
+        if normalization == "tilt":  # g2_l1_1: L1 on w |X| over the mean of w |Y|
+            weighted = target_spectrum.abs() * weight
+            return (prediction.abs() * weight - weighted).abs().mean() / weighted.mean()
+        # Log magnitudes (as the log-spectral loss) weighted by w, over the mean of w.
+        difference = (to_log_mag(prediction, rel_to_max=False) - to_log_mag(target_spectrum, rel_to_max=False)).abs()
+        return (weight * difference).mean() / weight.mean()
     if normalization in {"noise_floor", "noise_floor_sqrt"}:
         # Prediction plus the estimated noise power against the observed target,
         # so troughs that noise fills in do not dominate the error. A floor_scale
@@ -1068,7 +1080,8 @@ def _triangle_spectral_loss(prediction: torch.Tensor,
 # 600/1200/240): "mrstft" is spectral convergence + log magnitude (its default weights), "mrstft_lin"
 # linear magnitude only. The target window is recovered exactly from its rfft.
 MRSTFT_WEIGHTS = {"mrstft": dict(w_sc=1.0, w_log_mag=1.0, w_lin_mag=0.0),
-                  "mrstft_lin": dict(w_sc=0.0, w_log_mag=0.0, w_lin_mag=1.0)}
+                  "mrstft_lin": dict(w_sc=0.0, w_log_mag=0.0, w_lin_mag=1.0),
+                  "mrstft_log": dict(w_sc=0.0, w_log_mag=1.0, w_lin_mag=0.0)}
 _MRSTFT = {}
 
 
@@ -1082,6 +1095,10 @@ def _mrstft(prediction: torch.Tensor, target_spectrum: torch.Tensor, normalizati
 
 def _loss(prediction: torch.Tensor, target_spectrum: torch.Tensor,
           normalization: str, floor_scale: float = 1.0) -> torch.Tensor:
+    if normalization.startswith("mix:"):
+        # Weighted sum of named losses, "mix:w1*name1+w2*name2": the weights are part of the name.
+        return sum(float(w) * _loss(prediction, target_spectrum, name, floor_scale)
+                   for w, name in (term.split("*", 1) for term in normalization[4:].split("+")))
     if normalization in MRSTFT_WEIGHTS:
         return _mrstft(prediction, target_spectrum, normalization)
     return _triangle_spectral_loss(torch.fft.rfft(prediction),

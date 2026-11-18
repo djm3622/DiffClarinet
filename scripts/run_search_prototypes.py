@@ -51,7 +51,9 @@ LAGRANGE_GD = {"lagrange_gd_small": {"gd_restarts": 8, "gd_steps": 1500},
                "lagrange_gd_r8_mrstft": {"gd_restarts": 8, "gd_steps": 1500, "gd_triangle_loss": "mrstft",
                                          "gd_comb_loss": "mrstft"},
                "lagrange_gd_r8_mrstftlin": {"gd_restarts": 8, "gd_steps": 1500, "gd_triangle_loss": "mrstft_lin",
-                                            "gd_comb_loss": "mrstft_lin"}}
+                                            "gd_comb_loss": "mrstft_lin"},
+               # Loss comparison: 8 starts, descent, polish and refinement all under the config's loss.
+               "lagrange_gd_r8_own": {"gd_restarts": 8, "gd_steps": 1500, "gd_own_loss": True}}
 EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka", *LAGRANGE_GD)
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],

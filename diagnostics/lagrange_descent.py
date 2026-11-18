@@ -124,7 +124,7 @@ def _descend(config, kind, cfg, n, descent_loss, sources, valid):
             [float(m.scaled_allplus().detach()) for m in models])
 
 
-def _polish(models, pairs, spectrum, n, valid, calls):
+def _polish(models, pairs, spectrum, n, valid, calls, polish_loss="none"):
     """For each source (two passes when S > 1), try L +/- 1 and the mirrored position."""
     sources = len(models)
     for _ in range(2 if sources > 1 else 1):
@@ -150,11 +150,11 @@ def _polish(models, pairs, spectrum, n, valid, calls):
                         optimizer.param_groups[0]["lr"] = _cosine(0.02, 0.001, step, 120)
                         optimizer.param_groups[1]["lr"] = _cosine(0.05, 0.002, step, 120)
                         optimizer.zero_grad()
-                        _loss(rest + _wave(models[i], n, pair), spectrum, "none").backward()
+                        _loss(rest + _wave(models[i], n, pair), spectrum, polish_loss).backward()
                         optimizer.step()
                         _clamp_ka(models[i])
                     with torch.no_grad():
-                        score = float(_loss(rest + _wave(models[i], n, pair), spectrum, "none"))
+                        score = float(_loss(rest + _wave(models[i], n, pair), spectrum, polish_loss))
                     calls += 121
                     if best is None or score < best[0]:
                         best = (score, pair, float(models[i].scaled_gain()), float(models[i].scaled_allplus()))
@@ -171,6 +171,8 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
     # Descent loss: tilted (comb) and square-root (triangle) by default; gd_comb_loss and
     # gd_triangle_loss name another _loss normalization instead (for loss controls).
     comb_loss, triangle_loss = cfg.get("gd_comb_loss", "tilted"), cfg.get("gd_triangle_loss", "noise_floor_sqrt")
+    if cfg.get("gd_own_loss"):  # descent, polish and refinement all use the config's loss
+        comb_loss = triangle_loss = cfg["spectrum_normalization"]
     if kind == "comb" and comb_loss == "tilted":
         descent_loss = tilted_loss(n, target)
     elif kind == "comb" and comb_loss == "tilted_floor":
@@ -193,7 +195,8 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
     before = list(pairs)
     for i in range(sources):
         _set_ka(models[i], K[i], a[i])
-    pairs, calls = _polish(models, list(pairs), spectrum, n, valid, calls)
+    pairs, calls = _polish(models, list(pairs), spectrum, n, valid, calls,
+                           cfg["spectrum_normalization"] if cfg.get("gd_own_loss") else "none")
 
     def match(found):
         if truth is None:

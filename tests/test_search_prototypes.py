@@ -178,6 +178,35 @@ class PrototypeTests(unittest.TestCase):
         self.assertGreaterEqual(float(gd.tilted_floor_loss(256, target)(other)), 0.0)
         self.assertGreater(float(gd.tilted_floor_loss(256, target)(target)), float(gd.tilted_loss(256, target)(target)))
 
+    def test_tilt_mix_and_mrstft_log_losses(self) -> None:
+        from auraloss.freq import MultiResolutionSTFTLoss
+        from model.kps.training import _loss
+        torch.manual_seed(18)
+        target, other = torch.randn(4096), torch.randn(4096)
+        spectrum = torch.fft.rfft(target)
+        self.assertAlmostEqual(float(_loss(other, spectrum, "tilt")), float(gd.tilted_loss(4096, target)(other)), places=5)
+        self.assertAlmostEqual(float(_loss(target, spectrum, "tilt_log")), 0.0, places=6)
+        mixed = float(_loss(other, spectrum, "mix:2.0*mag+0.5*none"))
+        self.assertAlmostEqual(mixed, 2 * float(_loss(other, spectrum, "mag")) + 0.5 * float(_loss(other, spectrum, "none")), places=4)
+        reference = MultiResolutionSTFTLoss(w_sc=0.0, w_log_mag=1.0, w_lin_mag=0.0)(other[None, None], target[None, None])
+        self.assertAlmostEqual(float(_loss(other, spectrum, "mrstft_log")), float(reference), places=4)
+
+    def test_own_loss_descent_runs_and_charges(self) -> None:
+        from scripts import run_delay_benchmark as benchmark
+        config = {"model": {"L_min": 20, "L_max": 30, "position_min": 1, "position_max": 15,
+                            "initial_K": 0.9, "initial_a": 0.5, "gain_min": 0.5, "gain_max": 1.0},
+                  "fit": {"n_fft": 256}}
+        torch.manual_seed(19)
+        truth_models = benchmark.make_models(config, "comb", "random_search_local", 1)
+        target = _synth(truth_models, 256, [(24, 6)]).detach()
+        models = benchmark.make_models(config, "comb", "random_search_local", 1)
+        settings = cfg(n_fft=256, gd_steps=10, gd_restarts=2, refine_epochs=2, gd_own_loss=True,
+                       spectrum_normalization="mix:1.0*tilt+0.1*none")
+        history, calls = gd.fit_lagrange_gd(models, target, settings, "comb", config, [(24, 6)])
+        row = next(r for r in history if "descent_syntheses" in r)
+        self.assertEqual(row["descent_syntheses"], 2 * (10 + 1))
+        self.assertEqual(calls, row["calls"] + 2)
+
     def test_tilted_loss_is_zero_at_the_target_and_normalized(self) -> None:
         torch.manual_seed(13)
         target = torch.randn(256)
