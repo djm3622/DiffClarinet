@@ -29,7 +29,9 @@ MCMC_ABLATIONS = {"mcmc_pt_notemper": {"pt_tempering": False},
                   **{f"mcmc_pt_b{round(100 * f):02d}": {"search_budget_fraction": f}
                      for f in (0.05, 0.1, 0.25, 0.5)},
                   # 50,000 search syntheses per source (of 160,000).
-                  "mcmc_pt_50k": {"search_budget_fraction": 50000 / 160000}}
+                  "mcmc_pt_50k": {"search_budget_fraction": 50000 / 160000},
+                  # Loss comparison: the same budget, best-so-far logged every 500 charged syntheses.
+                  "mcmc_pt_50k_trace": {"search_budget_fraction": 50000 / 160000, "log_calls": 500}}
 # Coordinate-wise exhaustive sweep, with 1 or 100 Adam steps on K/a after each source visit.
 SWEEPS = {"coord_sweep": {"ka_steps_per_visit": 1}, "coord_sweep_ka100": {"ka_steps_per_visit": 100}}
 # Gradient-descent baseline (Lagrange delays, tilted/square-root loss, restarts, polish), 1,500 steps
@@ -53,7 +55,11 @@ LAGRANGE_GD = {"lagrange_gd_small": {"gd_restarts": 8, "gd_steps": 1500},
                "lagrange_gd_r8_mrstftlin": {"gd_restarts": 8, "gd_steps": 1500, "gd_triangle_loss": "mrstft_lin",
                                             "gd_comb_loss": "mrstft_lin"},
                # Loss comparison: 8 starts, descent, polish and refinement all under the config's loss.
-               "lagrange_gd_r8_own": {"gd_restarts": 8, "gd_steps": 1500, "gd_own_loss": True}}
+               "lagrange_gd_r8_own": {"gd_restarts": 8, "gd_steps": 1500, "gd_own_loss": True},
+               # Loss comparison at mcmc_pt_50k_trace's budget: as many starts as fit in 50,000 S (33),
+               # own-loss polish, best-start polish at 5/10/25/50/100% of the starts (uncharged).
+               "lagrange_gd_50k_own": {"gd_restarts": 0, "gd_steps": 1500, "gd_own_loss": True,
+                                       "gd_fill_budget": True, "search_budget_fraction": 50000 / 160000}}
 EXTRA_METHODS = ("rs_cached", "mcmc_grad_ot", *SWEEPS, *MCMC_ABLATIONS, "rs_cached_rwka", *LAGRANGE_GD)
 SETTINGS = dict(K_grid=[0.6, 0.75, 0.85, 0.92, 0.97], K_shifts=[-0.05, 0.05], gradient_every=10,
                 swap_probability=0.2, temperatures=[0.01, 0.03, 0.08, 0.2, 0.5, 1.2],

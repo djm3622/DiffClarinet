@@ -7,6 +7,7 @@ The start with the lowest descent loss at rounded delays is kept (that evaluatio
 descent too). A polish then tries L +/- 1 and the mirrored position for each source, refitting that
 source's K and a under the log-spectral loss, and the usual K/a refinement follows.
 """
+import copy
 import math
 
 import torch
@@ -182,21 +183,36 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
         descent_loss = lambda x: _loss(x, spectrum, name)
     valid = [set(m.all_pairs()) for m in models]
     log = Log(log_path, cfg["log_calls"])
-    calls, losses, best = 0, [], None
-    for start in range(cfg["gd_restarts"]):
+    polish_loss = cfg["spectrum_normalization"] if cfg.get("gd_own_loss") else "none"
+    restarts = cfg["gd_restarts"]
+    if cfg.get("gd_fill_budget"):  # as many starts as fit in the search budget (one start costs (steps + 1) S)
+        budget = cfg.get("search_budget_fraction", 1.0) * cfg["epochs"] * cfg["samples"]
+        restarts = max(int(budget // (cfg["gd_steps"] + 1)), 1)
+    checkpoints = sorted({max(round(f * restarts), 1) for f in (0.05, 0.1, 0.25, 0.5, 1.0)}) if cfg.get("gd_fill_budget") else []
+    calls, losses, best, checkpoint_rows, checkpoint_calls = 0, [], None, [], 0
+    for start in range(restarts):
         result = _descend(config, kind, cfg, n, descent_loss, sources, valid)
         calls += sources * (cfg["gd_steps"] + 1)
         losses.append(result[0])
         if best is None or result[0] < best[1][0]:
             best = (start, result)
         log(calls, result[0], result[1], models, force=True)
+        if start + 1 in checkpoints:
+            # Polish a copy of the best start so far with the arm's loss; its cost is logged, not charged.
+            trial = copy.deepcopy(models)
+            for i in range(sources):
+                _set_ka(trial[i], best[1][2][i], best[1][3][i])
+            polished, used = _polish(trial, list(best[1][1]), spectrum, n, valid, 0, polish_loss)
+            checkpoint_calls += used
+            checkpoint_rows.append({"starts": start + 1, "calls": calls, "seconds": log.rows[-1]["seconds"],
+                                    "best_start": best[0], "pairs_before_polish": [list(p) for p in best[1][1]],
+                                    "pairs_after_polish": [list(p) for p in polished], "polish_syntheses": used})
     descent_calls = calls
     _, (chosen_loss, pairs, K, a) = best
     before = list(pairs)
     for i in range(sources):
         _set_ka(models[i], K[i], a[i])
-    pairs, calls = _polish(models, list(pairs), spectrum, n, valid, calls,
-                           cfg["spectrum_normalization"] if cfg.get("gd_own_loss") else "none")
+    pairs, calls = _polish(models, list(pairs), spectrum, n, valid, calls, polish_loss)
 
     def match(found):
         if truth is None:
@@ -208,7 +224,8 @@ def fit_lagrange_gd(models: nn.ModuleList, target, cfg, kind: str, config: dict,
     log.rows.append({"calls": calls, "descent_syntheses": descent_calls,
                      "polish_syntheses": calls - descent_calls,
                      "refine_syntheses": cfg["refine_epochs"] * sources,
-                     "restarts": cfg["gd_restarts"], "chosen_restart": best[0],
+                     "restarts": restarts, "chosen_restart": best[0],
+                     "checkpoints": checkpoint_rows, "checkpoint_polish_syntheses_uncharged": checkpoint_calls,
                      "chosen_restart_loss": chosen_loss, "restart_losses": losses,
                      "pairs_before_polish": [list(p) for p in before],
                      "set_match_before_polish": match(before),

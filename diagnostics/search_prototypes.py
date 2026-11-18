@@ -7,6 +7,7 @@ one-source candidate cost one synthesis, which the budget counts as such.
 import json
 import math
 from pathlib import Path
+import time
 
 import torch
 from torch import nn
@@ -35,13 +36,14 @@ def _wave(model, n: int, pair) -> torch.Tensor:
 class Log:
     def __init__(self, path: Path | None, every: int):
         self.path, self.every, self.rows, self.next = path, every, [], 0
+        self.start = time.perf_counter()  # rows carry seconds since the fit started
 
     def __call__(self, calls, loss, pairs, models, force=False):
         if calls < self.next and not force:
             return
         self.next = calls + self.every
-        row = {"calls": calls, "loss": float(loss), "pairs": [list(p) for p in pairs],
-               "K": [float(m.scaled_gain().detach()) for m in models],
+        row = {"calls": calls, "seconds": time.perf_counter() - self.start, "loss": float(loss),
+               "pairs": [list(p) for p in pairs], "K": [float(m.scaled_gain().detach()) for m in models],
                "a": [float(m.scaled_allplus().detach()) for m in models]}
         self.rows.append(row)
         if self.path is not None:

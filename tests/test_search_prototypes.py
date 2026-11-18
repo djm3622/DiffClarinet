@@ -207,6 +207,26 @@ class PrototypeTests(unittest.TestCase):
         self.assertEqual(row["descent_syntheses"], 2 * (10 + 1))
         self.assertEqual(calls, row["calls"] + 2)
 
+    def test_budget_filling_descent_logs_starts_and_checkpoints(self) -> None:
+        from scripts import run_delay_benchmark as benchmark
+        config = {"model": {"L_min": 20, "L_max": 30, "position_min": 1, "position_max": 15,
+                            "initial_K": 0.9, "initial_a": 0.5, "gain_min": 0.5, "gain_max": 1.0},
+                  "fit": {"n_fft": 256}}
+        torch.manual_seed(20)
+        truth_models = benchmark.make_models(config, "triangle", "random_search_local", 1)
+        target = _synth(truth_models, 256, [(24, 7)]).detach()
+        models = benchmark.make_models(config, "triangle", "random_search_local", 1)
+        settings = cfg(n_fft=256, epochs=40, samples=4, gd_steps=10, gd_restarts=0, refine_epochs=2, gd_own_loss=True,
+                       gd_fill_budget=True, search_budget_fraction=1.0, spectrum_normalization="mag")
+        history, calls = gd.fit_lagrange_gd(models, target, settings, "triangle", config, [(24, 7)])
+        row = next(r for r in history if "descent_syntheses" in r)
+        self.assertEqual(row["restarts"], 160 // 11)
+        self.assertEqual(row["descent_syntheses"], row["restarts"] * 11)
+        self.assertEqual(sum(1 for r in history if "pairs" in r and "seconds" in r and r["calls"] <= row["descent_syntheses"]),
+                         row["restarts"])
+        self.assertEqual([c["starts"] for c in row["checkpoints"]], sorted({max(round(f * 14), 1) for f in (.05, .1, .25, .5, 1)}))
+        self.assertEqual(calls, row["calls"] + 2)
+
     def test_tilted_loss_is_zero_at_the_target_and_normalized(self) -> None:
         torch.manual_seed(13)
         target = torch.randn(256)
